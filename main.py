@@ -7,10 +7,15 @@ from flask import Flask, request
 app = Flask(__name__)
 
 # =====================
-# ENV
+# CONFIG
 # =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
+
+DAILY_LIMIT = 30
+COOLDOWN = 3.5
+IMAGE_LIMIT = 1
 
 # =====================
 # DB
@@ -31,56 +36,73 @@ CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     messages INTEGER DEFAULT 0,
     last_time REAL DEFAULT 0,
-    mode TEXT DEFAULT 'normal'
+    images INTEGER DEFAULT 0,
+    image_time REAL DEFAULT 0
 )
 """)
 
 conn.commit()
 
 # =====================
-# SETTINGS
+# UI
 # =====================
-DAILY_LIMIT = 30
-COOLDOWN = 4
+def keyboard(user_id):
+    is_admin = str(user_id) == ADMIN_ID
 
-# =====================
-# UI BUTTONS
-# =====================
-def keyboard():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "👤 Профиль", "callback_data": "profile"},
-                {"text": "ℹ️ Инфо", "callback_data": "info"}
-            ],
-            [
-                {"text": "🆕 Новый чат", "callback_data": "newchat"},
-                {"text": "⚙️ Режим", "callback_data": "mode"}
-            ]
+    buttons = [
+        [
+            {"text": "👤 Профиль", "callback_data": "profile"},
+            {"text": "🆕 Новый чат", "callback_data": "new"}
         ]
-    }
+    ]
+
+    if is_admin:
+        buttons.insert(0, [
+            {"text": "📊 Админ панель", "callback_data": "admin"}
+        ])
+
+    return {"inline_keyboard": buttons}
 
 # =====================
-# TELEGRAM SEND
+# SEND TEXT
 # =====================
-def send(chat_id, text):
+def send(chat_id, text, user_id):
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": text,
-            "reply_markup": keyboard()
-        })
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": keyboard(user_id)
+            },
+            timeout=10
+        )
     except:
         pass
 
 # =====================
-# USER SYSTEM
+# SEND IMAGE
+# =====================
+def send_image(chat_id, url):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            json={
+                "chat_id": chat_id,
+                "photo": url,
+                "caption": "🖼 NeoHelper AI"
+            },
+            timeout=10
+        )
+    except:
+        pass
+
+# =====================
+# USER
 # =====================
 def get_user(user_id):
     cursor.execute(
-        "SELECT messages, last_time, mode FROM users WHERE user_id=?",
+        "SELECT messages, last_time, images, image_time FROM users WHERE user_id=?",
         (user_id,)
     )
     return cursor.fetchone()
@@ -88,30 +110,32 @@ def get_user(user_id):
 def register(user_id):
     if not get_user(user_id):
         cursor.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?)",
-            (user_id, 0, 0, "normal")
+            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
+            (user_id, 0, 0, 0, 0)
         )
         conn.commit()
 
 # =====================
-# LIMIT + ANTI SPAM
+# LIMITS
 # =====================
-def check_limits(user_id):
+def check_message_limit(user_id):
+
+    if str(user_id) == ADMIN_ID:
+        return None
 
     user = get_user(user_id)
-
     if not user:
         register(user_id)
-        user = (0, 0, "normal")
+        user = (0, 0, 0, 0)
 
-    messages, last_time, mode = user
+    messages, last_time, images, img_time = user
     now = time.time()
 
     if now - last_time < COOLDOWN:
         return "⏳ Слишком быстро"
 
     if messages >= DAILY_LIMIT:
-        return "🚫 Лимит 30/день исчерпан"
+        return "🚫 Лимит сообщений исчерпан (30/день)"
 
     cursor.execute("""
         UPDATE users
@@ -124,20 +148,49 @@ def check_limits(user_id):
 
     return None
 
-# =====================
-# AI ENGINE
-# =====================
-def ask_ai(user_id, text):
+
+def check_image_limit(user_id):
+
+    if str(user_id) == ADMIN_ID:
+        return None
 
     user = get_user(user_id)
-    mode = user[2] if user else "normal"
+    if not user:
+        register(user_id)
+        user = (0, 0, 0, 0)
 
-    # save user msg
-    cursor.execute(
-        "INSERT INTO memory VALUES (?, ?, ?)",
-        (user_id, "user", text)
-    )
+    messages, last_time, images, img_time = user
+    now = time.time()
+
+    if images >= IMAGE_LIMIT:
+        return "🚫 Лимит картинок (1/день)"
+
+    cursor.execute("""
+        UPDATE users
+        SET images = images + 1,
+            image_time = ?
+        WHERE user_id=?
+    """, (now, user_id))
+
     conn.commit()
+
+    return None
+
+# =====================
+# IMAGE AI
+# =====================
+def is_image(text):
+    keys = ["нарисуй", "картинка", "рисунок", "изобрази"]
+    return any(k in text.lower() for k in keys)
+
+def make_image(prompt):
+    prompt = prompt.replace(" ", "%20")
+    return f"https://image.pollinations.ai/prompt/{prompt}"
+
+# =====================
+# AI
+# =====================
+def ask_ai(user_id, text):
 
     cursor.execute("""
         SELECT role, content FROM memory
@@ -146,25 +199,17 @@ def ask_ai(user_id, text):
         LIMIT 12
     """, (user_id,))
 
-    rows = cursor.fetchall()[::-1]
-
-    # SYSTEM PROMPT (mode based)
-    if mode == "fast":
-        style = "Отвечай очень коротко."
-    elif mode == "smart":
-        style = "Отвечай подробно и умно."
-    else:
-        style = "Отвечай нормально, понятно и дружелюбно."
+    history = cursor.fetchall()[::-1]
 
     messages = [
         {
             "role": "system",
-            "content": f"Ты NeoHelper AI. {style}"
+            "content": "Ты NeoHelper — умный, стабильный AI помощник."
         }
     ]
 
-    for r in rows:
-        messages.append({"role": r[0], "content": r[1]})
+    for h in history:
+        messages.append({"role": h[0], "content": h[1]})
 
     try:
         r = requests.post(
@@ -177,14 +222,18 @@ def ask_ai(user_id, text):
                 "model": "openai/gpt-3.5-turbo",
                 "messages": messages
             },
-            timeout=25
+            timeout=20
         )
 
         if r.status_code != 200:
-            return "⚠️ AI временно недоступен"
+            return "⚠️ AI недоступен"
 
         answer = r.json()["choices"][0]["message"]["content"]
 
+        cursor.execute(
+            "INSERT INTO memory VALUES (?, ?, ?)",
+            (user_id, "user", text)
+        )
         cursor.execute(
             "INSERT INTO memory VALUES (?, ?, ?)",
             (user_id, "assistant", answer)
@@ -197,39 +246,36 @@ def ask_ai(user_id, text):
         return "⚠️ Ошибка AI"
 
 # =====================
-# CALLBACKS
+# CALLBACK
 # =====================
 def handle_cb(data, chat_id, user_id):
 
     if data == "profile":
-        u = get_user(user_id)
-        send(chat_id, f"👤 ID: {user_id}\n💬 Msg: {u[0]}")
+        send(chat_id, f"👤 ID: {user_id}", user_id)
 
-    elif data == "info":
-        send(chat_id,
-            "ℹ️ NeoHelper v16\n"
-            "🤖 AI бот\n"
-            "🧠 память\n"
-            "⚡ режимы\n"
-            "🚫 лимиты"
-        )
-
-    elif data == "newchat":
+    elif data == "new":
         cursor.execute("DELETE FROM memory WHERE user_id=?", (user_id,))
         conn.commit()
-        send(chat_id, "🆕 Новый чат создан")
+        send(chat_id, "🆕 Новый чат создан", user_id)
 
-    elif data == "mode":
-        u = get_user(user_id)
-        new_mode = "smart" if u[2] == "normal" else "fast" if u[2] == "smart" else "normal"
+    elif data == "admin":
 
-        cursor.execute(
-            "UPDATE users SET mode=? WHERE user_id=?",
-            (new_mode, user_id)
+        if str(user_id) != ADMIN_ID:
+            send(chat_id, "⛔ Нет доступа", user_id)
+            return
+
+        cursor.execute("SELECT COUNT(*) FROM users")
+        users = cursor.fetchone()[0]
+
+        cursor.execute("SELECT SUM(messages) FROM users")
+        msgs = cursor.fetchone()[0] or 0
+
+        send(chat_id,
+            f"📊 ADMIN PANEL\n\n"
+            f"👥 Users: {users}\n"
+            f"💬 Messages: {msgs}",
+            user_id
         )
-        conn.commit()
-
-        send(chat_id, f"⚙️ Режим: {new_mode}")
 
 # =====================
 # WEBHOOK
@@ -238,7 +284,6 @@ def handle_cb(data, chat_id, user_id):
 def webhook():
 
     data = request.get_json()
-
     if not data:
         return "ok"
 
@@ -252,31 +297,42 @@ def webhook():
 
         register(user_id)
 
-        limit = check_limits(user_id)
-
+        # MESSAGE LIMIT
+        limit = check_message_limit(user_id)
         if limit:
-            send(chat_id, limit)
+            send(chat_id, limit, user_id)
             return "ok"
 
-        if text == "/clear":
-            cursor.execute("DELETE FROM memory WHERE user_id=?", (user_id,))
-            conn.commit()
-            send(chat_id, "🧠 очищено")
+        # IMAGE MODE
+        if is_image(text):
+            img_limit = check_image_limit(user_id)
+            if img_limit:
+                send(chat_id, img_limit, user_id)
+                return "ok"
+
+            prompt = text
+            for w in ["нарисуй", "картинка", "рисунок", "изобрази"]:
+                prompt = prompt.replace(w, "")
+
+            img_url = make_image(prompt.strip())
+            send_image(chat_id, img_url)
             return "ok"
 
+        # AI MODE
         reply = ask_ai(user_id, text)
-        send(chat_id, reply)
+        send(chat_id, reply, user_id)
 
         return "ok"
 
     if "callback_query" in data:
+
         cq = data["callback_query"]
 
         chat_id = cq["message"]["chat"]["id"]
         user_id = str(chat_id)
-        action = cq["data"]
+        data_cb = cq["data"]
 
-        handle_cb(action, chat_id, user_id)
+        handle_cb(data_cb, chat_id, user_id)
 
     return "ok"
 
@@ -285,7 +341,7 @@ def webhook():
 # =====================
 @app.route("/")
 def home():
-    return "🤖 NeoHelper v16 STABLE ONLINE"
+    return "🤖 NeoHelper v20 PRO STABLE ONLINE"
 
 # =====================
 # RUN
