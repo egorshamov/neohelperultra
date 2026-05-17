@@ -8,7 +8,7 @@ app = Flask(__name__)
 # ENV VARIABLES
 # ====================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # ====================================
 # MEMORY
@@ -16,7 +16,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 memory = {}
 
 # ====================================
-# SEND TELEGRAM MESSAGE
+# SEND MESSAGE TO TELEGRAM
 # ====================================
 def send_message(chat_id, text):
 
@@ -43,78 +43,63 @@ def send_message(chat_id, text):
 
 
 # ====================================
-# GEMINI AI
+# AI FUNCTION (OPENROUTER)
 # ====================================
 def ask_ai(user_id, text):
 
-    if not GEMINI_API_KEY:
-        return "❌ GEMINI_API_KEY not found"
+    if not OPENROUTER_API_KEY:
+        return "❌ OPENROUTER_API_KEY not found"
 
     history = memory.get(user_id, [])
 
     history.append({
         "role": "user",
-        "parts": [
-            {
-                "text": text
-            }
-        ]
+        "content": text
     })
 
-    # память ограничиваем
+    # ограничение памяти
     history = history[-10:]
 
-    # ✅ НОВЫЙ СТАБИЛЬНЫЙ GEMINI URL
-    gemini_url = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
-    )
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
-    payload = {
-        "contents": history
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "openai/gpt-3.5-turbo",
+        "messages": history
     }
 
     try:
 
         response = requests.post(
-            gemini_url,
-            json=payload,
-            timeout=20
+            url,
+            headers=headers,
+            json=data,
+            timeout=30
         )
 
-        print("GEMINI STATUS:", response.status_code)
-        print("GEMINI RAW:", response.text)
+        print("AI STATUS:", response.status_code)
+        print("AI RAW:", response.text)
 
         if response.status_code != 200:
-            return f"⚠️ Gemini HTTP Error {response.status_code}"
+            return f"⚠️ AI HTTP Error {response.status_code}"
 
         result = response.json()
 
-        if "error" in result:
-            return f"⚠️ Gemini Error: {result['error']}"
-
-        candidates = result.get("candidates", [])
-
-        if not candidates:
-            return "⚠️ Empty AI response"
-
         answer = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "⚠️ No text")
+            result["choices"][0]
+            ["message"]["content"]
         )
 
         print("AI ANSWER:", answer)
 
         # сохраняем память
         history.append({
-            "role": "model",
-            "parts": [
-                {
-                    "text": answer
-                }
-            ]
+            "role": "assistant",
+            "content": answer
         })
 
         memory[user_id] = history
@@ -136,9 +121,9 @@ def handle_commands(text, user_id):
     if text == "/start":
 
         return (
-            "🤖 NeoHelper v7\n\n"
+            "🤖 NeoHelper v8\n\n"
             "AI бот успешно работает.\n"
-            "Просто напиши сообщение."
+            "Напиши любое сообщение."
         )
 
     if text == "/help":
@@ -210,16 +195,16 @@ def webhook():
 
 
 # ====================================
-# HOME
+# HOME PAGE
 # ====================================
 @app.route("/")
 def home():
 
-    return "🤖 NeoHelper v7 ONLINE"
+    return "🤖 NeoHelper v8 ONLINE"
 
 
 # ====================================
-# RUN
+# RUN SERVER
 # ====================================
 if __name__ == "__main__":
 
