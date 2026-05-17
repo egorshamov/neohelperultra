@@ -1,33 +1,23 @@
 import os
+import time
 import sqlite3
 import requests
-
 from flask import Flask, request
-
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
 
 app = Flask(__name__)
 
-# ====================================
-# ENV VARIABLES
-# ====================================
+# =========================
+# ENV
+# =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# ====================================
-# DATABASE
-# ====================================
-conn = sqlite3.connect(
-    "neohelper.db",
-    check_same_thread=False
-)
-
+# =========================
+# DB
+# =========================
+conn = sqlite3.connect("neohelper.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# MEMORY TABLE
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memory (
     user_id TEXT,
@@ -36,197 +26,138 @@ CREATE TABLE IF NOT EXISTS memory (
 )
 """)
 
-# USERS TABLE
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT,
-    messages INTEGER
+    user_id TEXT PRIMARY KEY,
+    messages INTEGER DEFAULT 0,
+    last_time REAL DEFAULT 0
 )
 """)
 
 conn.commit()
 
-# ====================================
-# MAIN MENU
-# ====================================
-def main_menu():
+# =========================
+# SETTINGS
+# =========================
+DAILY_LIMIT = 30
+COOLDOWN = 4
 
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "💬 Новый чат",
-                callback_data="new_chat"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🧠 Очистить память",
-                callback_data="clear_memory"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "👤 Профиль",
-                callback_data="profile"
-            ),
-
-            InlineKeyboardButton(
-                "ℹ️ Помощь",
-                callback_data="help"
-            )
+# =========================
+# MENU (ALWAYS SHOWN)
+# =========================
+def menu():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🤖 AI", "callback_data": "ai"},
+                {"text": "👤 Профиль", "callback_data": "profile"}
+            ],
+            [
+                {"text": "🧠 Очистить", "callback_data": "clear"},
+                {"text": "ℹ️ Инфо", "callback_data": "info"}
+            ]
         ]
-    ]
+    }
 
-    return InlineKeyboardMarkup(keyboard)
+# =========================
+# TELEGRAM SEND
+# =========================
+def send(chat_id, text):
 
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ====================================
-# REGISTER USER
-# ====================================
-def register_user(user_id):
-
-    cursor.execute(
-        "SELECT * FROM users WHERE user_id=?",
-        (user_id,)
+    requests.post(
+        url,
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": menu()
+        }
     )
 
-    user = cursor.fetchone()
+# =========================
+# USER SYSTEM
+# =========================
+def get_user(user_id):
+    cursor.execute(
+        "SELECT messages, last_time FROM users WHERE user_id=?",
+        (user_id,)
+    )
+    return cursor.fetchone()
 
-    if not user:
-
+def register(user_id):
+    if not get_user(user_id):
         cursor.execute(
-            "INSERT INTO users VALUES (?, ?)",
-            (user_id, 0)
+            "INSERT INTO users VALUES (?, ?, ?)",
+            (user_id, 0, 0)
         )
-
         conn.commit()
 
+# =========================
+# LIMIT SYSTEM
+# =========================
+def check_limits(user_id):
 
-# ====================================
-# SEND MESSAGE
-# ====================================
-def send_message(chat_id, text):
+    user = get_user(user_id)
 
-    try:
+    if not user:
+        register(user_id)
+        user = (0, 0)
 
-        url = (
-            f"https://api.telegram.org/"
-            f"bot{BOT_TOKEN}/sendMessage"
-        )
+    messages, last_time = user
+    now = time.time()
 
-        response = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "reply_markup": main_menu().to_dict()
-            },
-            timeout=10
-        )
+    if now - last_time < COOLDOWN:
+        return "⏳ Слишком быстро"
 
-        print("TELEGRAM:", response.text)
+    if messages >= DAILY_LIMIT:
+        return "🚫 Лимит 30 сообщений/день"
 
-    except Exception as e:
-
-        print("SEND ERROR:", e)
-
-
-# ====================================
-# TYPING EFFECT
-# ====================================
-def send_typing(chat_id):
-
-    try:
-
-        url = (
-            f"https://api.telegram.org/"
-            f"bot{BOT_TOKEN}/sendChatAction"
-        )
-
-        requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "action": "typing"
-            },
-            timeout=5
-        )
-
-    except:
-        pass
-
-
-# ====================================
-# AI FUNCTION
-# ====================================
-def ask_ai(user_id, text):
-
-    if not OPENROUTER_API_KEY:
-        return "❌ OPENROUTER_API_KEY not found"
-
-    register_user(user_id)
-
-    cursor.execute(
-        """
+    cursor.execute("""
         UPDATE users
-        SET messages = messages + 1
+        SET messages = messages + 1,
+            last_time = ?
         WHERE user_id=?
-        """,
-        (user_id,)
-    )
+    """, (now, user_id))
 
     conn.commit()
 
-    # SAVE USER MESSAGE
+    return None
+
+# =========================
+# AI
+# =========================
+def ask_ai(user_id, text):
+
     cursor.execute(
         "INSERT INTO memory VALUES (?, ?, ?)",
         (user_id, "user", text)
     )
-
     conn.commit()
 
-    # LOAD HISTORY
-    cursor.execute(
-        """
-        SELECT role, content
-        FROM memory
+    cursor.execute("""
+        SELECT role, content FROM memory
         WHERE user_id=?
         ORDER BY rowid DESC
         LIMIT 10
-        """,
-        (user_id,)
-    )
+    """, (user_id,))
 
-    rows = cursor.fetchall()
+    rows = cursor.fetchall()[::-1]
 
-    rows.reverse()
+    messages = [
+        {
+            "role": "system",
+            "content": "Ты NeoHelper — умный, краткий и дружелюбный AI ассистент."
+        }
+    ]
 
-    messages = []
+    for r in rows:
+        messages.append({"role": r[0], "content": r[1]})
 
-    # SYSTEM PROMPT
-    messages.append({
-        "role": "system",
-        "content": (
-            "Ты NeoHelper — умный AI помощник. "
-            "Отвечай дружелюбно, красиво и полезно."
-        )
-    })
-
-    # MEMORY
-    for role, content in rows:
-
-        messages.append({
-            "role": role,
-            "content": content
-        })
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
     headers = {
-        "Authorization": (
-            f"Bearer {OPENROUTER_API_KEY}"
-        ),
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
 
@@ -236,186 +167,132 @@ def ask_ai(user_id, text):
     }
 
     try:
+        r = requests.post(url, headers=headers, json=data)
 
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=30
-        )
+        if r.status_code != 200:
+            return "⚠️ AI error"
 
-        print("AI STATUS:", response.status_code)
+        answer = r.json()["choices"][0]["message"]["content"]
 
-        if response.status_code != 200:
-
-            print(response.text)
-
-            return (
-                f"⚠️ AI Error {response.status_code}"
-            )
-
-        result = response.json()
-
-        answer = (
-            result["choices"][0]
-            ["message"]["content"]
-        )
-
-        # SAVE AI RESPONSE
         cursor.execute(
             "INSERT INTO memory VALUES (?, ?, ?)",
             (user_id, "assistant", answer)
         )
-
         conn.commit()
 
-        return f"🤖 NeoHelper\n\n{answer}"
+        return answer
 
     except Exception as e:
-
-        print("AI ERROR:", e)
-
         return f"⚠️ AI ERROR: {e}"
 
+# =========================
+# CALLBACKS
+# =========================
+def handle_callback(action, chat_id, user_id):
 
-# ====================================
-# COMMANDS
-# ====================================
-def handle_commands(text, user_id):
-
-    if text == "/start":
-
-        return (
-            "┏━━━━━━━━━━━━━┓\n"
-            "   🤖 NeoHelper AI\n"
-            "┗━━━━━━━━━━━━━┛\n\n"
-            "🧠 Умный Telegram AI\n"
-            "⚡ Powered by OpenRouter\n"
-            "🌐 Render Cloud Online\n\n"
-            "Выберите действие 👇"
-        )
-
-    if text == "/help":
-
-        return (
-            "ℹ️ HELP\n\n"
-            "/start - запуск\n"
-            "/help - помощь\n"
-            "/clear - очистить память\n"
-            "/profile - профиль"
-        )
-
-    if text == "/clear":
-
-        cursor.execute(
-            "DELETE FROM memory WHERE user_id=?",
-            (user_id,)
-        )
-
-        conn.commit()
-
-        return "🧠 Память очищена"
-
-    if text == "/profile":
-
-        register_user(user_id)
+    if action == "profile":
 
         cursor.execute(
             "SELECT messages FROM users WHERE user_id=?",
             (user_id,)
         )
 
-        result = cursor.fetchone()
+        res = cursor.fetchone()
+        count = res[0] if res else 0
 
-        messages = result[0]
-
-        return (
-            "╔══ 👤 PROFILE ══╗\n\n"
+        send(chat_id,
+            f"👤 Профиль\n\n"
             f"🆔 ID: {user_id}\n"
-            f"💬 Messages: {messages}\n"
-            "⭐ Status: User\n\n"
-            "╚═══════════════╝"
+            f"💬 Запросов: {count}\n"
+            f"🚀 Лимит: {DAILY_LIMIT}/день"
         )
 
-    return None
+    elif action == "info":
 
+        send(chat_id,
+            "ℹ️ NeoHelper v15\n\n"
+            "🤖 AI ассистент\n"
+            "🧠 Память включена\n"
+            "🚫 30 запросов/день\n"
+            "⏳ Антиспам активен"
+        )
 
-# ====================================
+    elif action == "clear":
+
+        cursor.execute("DELETE FROM memory WHERE user_id=?", (user_id,))
+        conn.commit()
+
+        send(chat_id, "🧠 Память очищена")
+
+    elif action == "ai":
+
+        send(chat_id, "🤖 Напиши сообщение — я отвечу через AI")
+
+# =========================
 # WEBHOOK
-# ====================================
+# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
-    try:
+    data = request.get_json()
 
-        data = request.get_json()
+    if not data:
+        return "ok", 200
 
-        print("WEBHOOK:", data)
+    # MESSAGE
+    if "message" in data:
 
-        if not data:
-            return "ok", 200
+        msg = data["message"]
 
-        if "message" not in data:
-            return "ok", 200
-
-        message = data["message"]
-
-        chat_id = message["chat"]["id"]
-
-        text = message.get("text", "")
-
-        print("USER:", text)
-
+        chat_id = msg["chat"]["id"]
+        text = msg.get("text", "")
         user_id = str(chat_id)
 
-        # TYPING EFFECT
-        send_typing(chat_id)
+        register(user_id)
 
-        # COMMANDS
-        cmd = handle_commands(
-            text,
-            user_id
-        )
+        limit = check_limits(user_id)
 
-        if cmd:
-
-            send_message(chat_id, cmd)
-
+        if limit:
+            send(chat_id, limit)
             return "ok", 200
 
-        # AI RESPONSE
+        # AI or system commands
+        if text == "/clear":
+            cursor.execute("DELETE FROM memory WHERE user_id=?", (user_id,))
+            conn.commit()
+            send(chat_id, "🧠 Память очищена")
+            return "ok", 200
+
         reply = ask_ai(user_id, text)
-
-        send_message(chat_id, reply)
-
-        return "ok", 200
-
-    except Exception as e:
-
-        print("WEBHOOK ERROR:", e)
+        send(chat_id, reply)
 
         return "ok", 200
 
+    # BUTTONS
+    if "callback_query" in data:
 
-# ====================================
-# HOME PAGE
-# ====================================
+        cq = data["callback_query"]
+
+        chat_id = cq["message"]["chat"]["id"]
+        user_id = str(chat_id)
+        action = cq["data"]
+
+        handle_callback(action, chat_id, user_id)
+
+        return "ok", 200
+
+    return "ok", 200
+
+# =========================
+# HOME
+# =========================
 @app.route("/")
 def home():
+    return "🤖 NeoHelper v15 MENU MODE ONLINE"
 
-    return "🤖 NeoHelper v11 ONLINE"
-
-
-# ====================================
-# RUN SERVER
-# ====================================
+# =========================
+# RUN
+# =========================
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get("PORT", 10000)
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
