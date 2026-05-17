@@ -125,7 +125,7 @@ def cmd(text, user_id):
 # =======================
 # WEBHOOK CORE
 # =======================
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def telegram():
     try:
         data = request.get_json()
