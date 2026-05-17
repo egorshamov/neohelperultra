@@ -19,59 +19,217 @@ CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     messages INTEGER DEFAULT 0,
     images INTEGER DEFAULT 0,
-    last_time REAL DEFAULT 0,
+    last_reset REAL DEFAULT 0,
     plan TEXT DEFAULT 'basic',
     chat_mode TEXT DEFAULT 'smart',
     image_mode INTEGER DEFAULT 0,
+    image_style TEXT DEFAULT 'realistic',
     subscription_end REAL DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memory (
-    user_id TEXT,
-    role TEXT,
-    content TEXT
 )
 """)
 
 conn.commit()
 
+# ================= STATE =================
+user_state = {}
+admin_state = {}
+
 # ================= PLANS =================
 PLANS = {
-    "basic": {"messages": 40, "images": 3, "price": 0},
-    "pro": {"messages": 9999, "images": 9999, "price": 100},
-    "ultra": {"messages": 9999, "images": 9999, "price": 300}
+    "basic": {"messages": 40, "images": 3},
+    "lite": {"messages": 50, "images": 5},
+    "pro": {"messages": 200, "images": 15},
+    "ultra": {"messages": 999999, "images": 999999}
 }
 
-# ================= USER =================
-def register(uid):
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+# ================= AUTO USER =================
+def ensure_user(chat_id):
+    cursor.execute("SELECT user_id FROM users WHERE user_id=?", (chat_id,))
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO users (user_id) VALUES (?)", (uid,))
+        cursor.execute("""
+            INSERT INTO users (user_id, last_reset)
+            VALUES (?, ?)
+        """, (chat_id, time.time()))
         conn.commit()
 
-def get_user(uid):
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (uid,))
-    return cursor.fetchone()
+# ================= DAILY RESET =================
+def reset_limits_if_needed(chat_id):
+    cursor.execute("SELECT last_reset FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
 
-def is_sub_active(user):
-    return time.time() < user[7]
+    last = row[0]
+    now = time.time()
 
-def get_plan(user):
-    if is_sub_active(user):
-        return user[4]
-    return "basic"
+    # 24h reset
+    if now - last > 86400:
+        cursor.execute("""
+            UPDATE users
+            SET messages=0,
+                images=0,
+                last_reset=?
+            WHERE user_id=?
+        """, (now, chat_id))
+        conn.commit()
 
-# ================= MEMORY =================
-def save_memory(uid, role, text):
-    cursor.execute("INSERT INTO memory VALUES (?,?,?)", (uid, role, text))
+# ================= SPAM =================
+def check_spam(chat_id, limit=2):
+    now = time.time()
+    if chat_id in user_state:
+        if now - user_state[chat_id] < limit:
+            return False
+    user_state[chat_id] = now
+    return True
+
+# ================= PLAN =================
+def get_plan(chat_id):
+    cursor.execute("SELECT plan FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
+    return row[0] if row else "basic"
+
+# ================= LIMITS =================
+def check_message_limit(chat_id):
+
+    plan = get_plan(chat_id)
+    limit = PLANS[plan]["messages"]
+
+    cursor.execute("SELECT messages FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
+    used = row[0] if row else 0
+
+    if used >= limit:
+        return False
+
+    cursor.execute("UPDATE users SET messages = messages + 1 WHERE user_id=?", (chat_id,))
     conn.commit()
+    return True
 
-def load_memory(uid):
-    cursor.execute("SELECT role,content FROM memory WHERE user_id=? ORDER BY rowid DESC LIMIT 6", (uid,))
-    rows = cursor.fetchall()
-    return list(reversed([{"role": r[0], "content": r[1]} for r in rows]))
+
+def check_image_limit(chat_id):
+
+    plan = get_plan(chat_id)
+    limit = PLANS[plan]["images"]
+
+    cursor.execute("SELECT images FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
+    used = row[0] if row else 0
+
+    if used >= limit:
+        return False
+
+    cursor.execute("UPDATE users SET images = images + 1 WHERE user_id=?", (chat_id,))
+    conn.commit()
+    return True
+
+# ================= REMAINING =================
+def get_remaining(chat_id):
+    plan = get_plan(chat_id)
+    limits = PLANS[plan]
+
+    cursor.execute("SELECT messages, images FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        return limits["messages"], limits["images"]
+
+    used_m, used_i = row
+    return (
+        limits["messages"] - used_m,
+        limits["images"] - used_i
+    )
+
+# ================= IMAGE =================
+IMAGE_STYLES = {
+    "anime": "anime style, detailed",
+    "realistic": "ultra realistic, cinematic lighting",
+    "3d": "3d render, octane render"
+}
+
+def clean_prompt(text):
+    bad = ["картинка","нарисуй","сделай","создай","хочу","image","draw"]
+    for w in bad:
+        text = text.replace(w, "")
+    return text.strip()
+
+def enhance_prompt(text, style):
+    return f"{text}, {IMAGE_STYLES.get(style)}"
+
+def make_img(prompt):
+    return "https://image.pollinations.ai/prompt/" + prompt.replace(" ", "%20")
+
+# ================= AI =================
+def ask_ai(uid, text):
+
+    cursor.execute("SELECT chat_mode FROM users WHERE user_id=?", (uid,))
+    row = cursor.fetchone()
+    mode = row[0] if row else "smart"
+
+    system = "You are a helpful AI assistant. no greetings."
+
+    if mode == "fast":
+        system += " short answers"
+    elif mode == "smart":
+        system += " normal answers"
+    elif mode == "deep":
+        system += " detailed answers"
+
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+        json={
+            "model": "openai/gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": text}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+    )
+
+    return r.json()["choices"][0]["message"]["content"]
+
+# ================= KEYBOARDS =================
+def keyboard():
+    return {
+        "keyboard": [
+            ["💬 Чат", "🖼 Картинка"],
+            ["💳 PRO ⭐", "👑 Админ"],
+            ["📊 Лимиты"]
+        ],
+        "resize_keyboard": True
+    }
+
+def chat_keyboard():
+    return {
+        "keyboard": [
+            ["⚡ Быстро", "🧠 Умно", "📚 Подробно"],
+            ["🔙 Назад"]
+        ],
+        "resize_keyboard": True
+    }
+
+def image_keyboard():
+    return {
+        "keyboard": [
+            ["🎨 anime", "📸 realistic", "🧊 3d"],
+            ["🔙 Назад"]
+        ],
+        "resize_keyboard": True
+    }
+
+def admin_keyboard():
+    return {
+        "keyboard": [
+            ["📊 Статистика"],
+            ["💎 Выдать PRO (1)"],
+            ["💎 Выдать PRO (2)"],
+            ["💎 Выдать ULTRA (3)"],
+            ["🔙 Выйти"]
+        ],
+        "resize_keyboard": True
+    }
 
 # ================= SEND =================
 def send(chat_id, text, kb=None):
@@ -84,177 +242,153 @@ def send_image(chat_id, url):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
                   json={"chat_id": chat_id, "photo": url})
 
-# ================= KEYBOARD =================
-def keyboard():
-    return {
-        "keyboard": [["💬 Чат", "🖼 Картинка"], ["💳 PRO ⭐", "👑 Админ"]],
-        "resize_keyboard": True
-    }
-
-def chat_keyboard():
-    return {
-        "keyboard": [["⚡ Быстро","🧠 Умно","📚 Подробно"],["🔙 Назад"]],
-        "resize_keyboard": True
-    }
-
-# ================= IMAGE =================
-STYLES = {
-    "anime": "anime style, detailed",
-    "realistic": "ultra realistic, cinematic",
-    "3d": "3d render, octane"
-}
-
-def enhance_prompt(text, style="realistic"):
-    return f"{text}, {STYLES.get(style)}, high quality"
-
-def make_img(prompt):
-    prompt = prompt.replace(" ", "%20")
-    return f"https://image.pollinations.ai/prompt/{prompt}"
-
-# ================= AI =================
-def ask_ai(uid, text):
-    save_memory(uid, "user", text)
-    hist = load_memory(uid)
-
-    cursor.execute("SELECT chat_mode FROM users WHERE user_id=?", (uid,))
-    mode = cursor.fetchone()[0]
-
-    style = {
-        "fast": "short answer",
-        "smart": "normal answer",
-        "deep": "very detailed explanation"
-    }
-
-    system = f"You are AI assistant. no greetings. {style.get(mode)}"
-
-    messages = [{"role":"system","content":system}] + hist
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-        json={
-            "model":"openai/gpt-3.5-turbo",
-            "messages":messages,
-            "temperature":0.8,
-            "max_tokens":300
-        }
-    )
-
-    ans = r.json()["choices"][0]["message"]["content"]
-    save_memory(uid, "assistant", ans)
-    return ans
-
-# ================= LIMITS =================
-def check_limits(user):
-    plan = get_plan(user)
-    msg_limit = PLANS[plan]["messages"]
-
-    if user[1] >= msg_limit:
-        return False
-
-    cursor.execute("UPDATE users SET messages=messages+1 WHERE user_id=?", (user[0],))
-    conn.commit()
-    return True
-
-def check_img(user):
-    plan = get_plan(user)
-    img_limit = PLANS[plan]["images"]
-
-    if user[2] >= img_limit:
-        return False
-
-    cursor.execute("UPDATE users SET images=images+1 WHERE user_id=?", (user[0],))
-    conn.commit()
-    return True
-
-# ================= PAYMENT =================
-def send_invoice(chat_id, plan="pro"):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice",
-        json={
-            "chat_id": chat_id,
-            "title": f"{plan.upper()} plan",
-            "description": "AI access",
-            "payload": plan,
-            "currency": "XTR",
-            "prices":[{"label":plan,"amount":PLANS[plan]["price"]}]
-        }
-    )
-
 # ================= ADMIN =================
-def is_admin(uid):
-    return str(uid) == ADMIN_ID
+def is_admin(chat_id):
+    return str(chat_id) == str(ADMIN_ID)
 
-def give_pro(uid, plan="pro"):
-    end = time.time() + 30*86400
-    cursor.execute("UPDATE users SET plan=?, subscription_end=? WHERE user_id=?",
-                   (plan, end, uid))
+def give_plan(uid, plan):
+    end = time.time() + 30 * 86400
+    cursor.execute("""
+        UPDATE users
+        SET plan=?, subscription_end=?
+        WHERE user_id=?
+    """, (plan, end, uid))
     conn.commit()
 
 # ================= ROUTER =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+
     data = request.json
     msg = data.get("message", {})
     chat_id = str(msg.get("chat", {}).get("id"))
     text = msg.get("text", "")
 
-    register(chat_id)
-    user = get_user(chat_id)
+    # ================= AUTO USER + RESET =================
+    ensure_user(chat_id)
+    reset_limits_if_needed(chat_id)
 
-    # PAYMENT
-    if "successful_payment" in msg:
-        payload = msg["successful_payment"]["invoice_payload"]
-        give_pro(chat_id, payload)
-        send(chat_id, "💎 PRO активирован!")
+    # ================= SPAM =================
+    if not check_spam(chat_id):
+        send(chat_id, "⏳ слишком быстро")
         return "ok"
 
-    if text == "/start":
-        send(chat_id, "🤖 v43 SaaS", keyboard())
+    # ================= LIMIT INFO =================
+    if text == "📊 Лимиты":
+        msg_left, img_left = get_remaining(chat_id)
+        send(chat_id, f"📊 Осталось:\n💬 {msg_left} сообщений\n🖼 {img_left} картинок")
         return "ok"
 
-    if text == "💳 PRO ⭐":
-        send_invoice(chat_id, "pro")
+    # ================= ADMIN =================
+    if text == "👑 Админ":
+        if not is_admin(chat_id):
+            send(chat_id, "⛔ нет доступа")
+            return "ok"
+
+        admin_state[chat_id] = {"mode": "menu"}
+        send(chat_id, "👑 админ панель", admin_keyboard())
         return "ok"
 
+    if text == "🔙 Выйти":
+        if chat_id in admin_state:
+            admin_state.pop(chat_id)
+        send(chat_id, "🏠 меню", keyboard())
+        return "ok"
+
+    if text == "📊 Статистика":
+        if is_admin(chat_id):
+            cursor.execute("SELECT COUNT(*) FROM users")
+            users = cursor.fetchone()[0]
+
+            send(chat_id, f"📊 users: {users}", admin_keyboard())
+        return "ok"
+
+    if text in ["💎 Выдать PRO (1)","💎 Выдать PRO (2)","💎 Выдать ULTRA (3)"]:
+
+        if not is_admin(chat_id):
+            return "ok"
+
+        plan = {
+            "💎 Выдать PRO (1)": "lite",
+            "💎 Выдать PRO (2)": "pro",
+            "💎 Выдать ULTRA (3)": "ultra"
+        }[text]
+
+        admin_state[chat_id] = {"mode":"give","plan":plan}
+        send(chat_id, "👤 введи ID")
+        return "ok"
+
+    if chat_id in admin_state and admin_state[chat_id].get("mode") == "give":
+
+        plan = admin_state[chat_id]["plan"]
+        give_plan(text, plan)
+
+        send(chat_id, f"💎 выдано {plan}", admin_keyboard())
+        admin_state.pop(chat_id)
+        return "ok"
+
+    # ================= CHAT =================
     if text == "💬 Чат":
-        send(chat_id, "чат режим", chat_keyboard())
+        send(chat_id, "🤖 режим:", chat_keyboard())
         return "ok"
 
+    if text in ["⚡ Быстро","🧠 Умно","📚 Подробно"]:
+        mode = {"⚡ Быстро":"fast","🧠 Умно":"smart","📚 Подробно":"deep"}[text]
+        cursor.execute("UPDATE users SET chat_mode=? WHERE user_id=?", (mode, chat_id))
+        conn.commit()
+        send(chat_id, f"🎯 режим: {mode}", chat_keyboard())
+        return "ok"
+
+    # ================= IMAGE =================
     if text == "🖼 Картинка":
         cursor.execute("UPDATE users SET image_mode=1 WHERE user_id=?", (chat_id,))
         conn.commit()
-        send(chat_id, "режим картинки включён", keyboard())
+        send(chat_id, "🎨 стиль:", image_keyboard())
         return "ok"
 
-    if text == "👑 Админ" and is_admin(chat_id):
-        send(chat_id, "admin panel")
+    if text in ["🎨 anime","📸 realistic","🧊 3d"]:
+        style = {"🎨 anime":"anime","📸 realistic":"realistic","🧊 3d":"3d"}[text]
+        cursor.execute("UPDATE users SET image_style=? WHERE user_id=?", (style, chat_id))
+        conn.commit()
+        send(chat_id, f"🎯 {style}", image_keyboard())
         return "ok"
 
-    # IMAGE MODE
-    cursor.execute("SELECT image_mode FROM users WHERE user_id=?", (chat_id,))
-    im = cursor.fetchone()[0]
-
-    if im == 1:
-        if check_img(user):
-            prompt = enhance_prompt(text)
-            send_image(chat_id, make_img(prompt))
-            cursor.execute("UPDATE users SET image_mode=0 WHERE user_id=?", (chat_id,))
-            conn.commit()
+    if text == "🔙 Назад":
+        cursor.execute("UPDATE users SET image_mode=0 WHERE user_id=?", (chat_id,))
+        conn.commit()
+        send(chat_id, "🏠 меню", keyboard())
         return "ok"
 
-    # CHAT
-    if check_limits(user):
-        reply = ask_ai(chat_id, text)
-        send(chat_id, reply, keyboard())
-    else:
-        send(chat_id, "limit")
+    # ================= IMAGE MODE =================
+    cursor.execute("SELECT image_mode,image_style FROM users WHERE user_id=?", (chat_id,))
+    row = cursor.fetchone()
 
+    if row and row[0] == 1:
+
+        if not check_image_limit(chat_id):
+            send(chat_id, "🚫 лимит картинок")
+            return "ok"
+
+        style = row[1]
+        prompt = enhance_prompt(clean_prompt(text), style)
+
+        send_image(chat_id, make_img(prompt + " v1"))
+        send_image(chat_id, make_img(prompt + " v2"))
+        return "ok"
+
+    # ================= LIMIT MSG =================
+    if not check_message_limit(chat_id):
+        send(chat_id, "🚫 лимит сообщений")
+        return "ok"
+
+    # ================= AI =================
+    reply = ask_ai(chat_id, text)
+    send(chat_id, reply, keyboard())
     return "ok"
 
 @app.route("/")
 def home():
-    return "v43 SaaS ONLINE"
+    return "v49 FULL SYSTEM + LIMITS + RESET + STATS"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
