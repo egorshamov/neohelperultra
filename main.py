@@ -6,17 +6,12 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# =====================
-# CONFIG
-# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 
-# =====================
-# DB
-# =====================
-conn = sqlite3.connect("neohelper.db", check_same_thread=False)
+# ================= DB =================
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -25,7 +20,10 @@ CREATE TABLE IF NOT EXISTS users (
     messages INTEGER DEFAULT 0,
     images INTEGER DEFAULT 0,
     last_time REAL DEFAULT 0,
-    plan TEXT DEFAULT 'free'
+    plan TEXT DEFAULT 'basic',
+    chat_mode TEXT DEFAULT 'smart',
+    image_mode INTEGER DEFAULT 0,
+    subscription_end REAL DEFAULT 0
 )
 """)
 
@@ -39,328 +37,224 @@ CREATE TABLE IF NOT EXISTS memory (
 
 conn.commit()
 
-# =====================
-# LIMITS
-# =====================
-def limits(plan):
-    if plan == "pro":
-        return 9999, 9999
-    return 40, 3
+# ================= PLANS =================
+PLANS = {
+    "basic": {"messages": 40, "images": 3, "price": 0},
+    "pro": {"messages": 9999, "images": 9999, "price": 100},
+    "ultra": {"messages": 9999, "images": 9999, "price": 300}
+}
 
-# =====================
-# USERS
-# =====================
-def get_user(user_id):
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    return cursor.fetchone()
-
-def register(user_id):
-    if not get_user(user_id):
-        cursor.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
-            (user_id, 0, 0, 0, "free")
-        )
+# ================= USER =================
+def register(uid):
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO users (user_id) VALUES (?)", (uid,))
         conn.commit()
 
-def set_plan(user_id, plan):
-    cursor.execute("UPDATE users SET plan=? WHERE user_id=?", (plan, user_id))
+def get_user(uid):
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    return cursor.fetchone()
+
+def is_sub_active(user):
+    return time.time() < user[7]
+
+def get_plan(user):
+    if is_sub_active(user):
+        return user[4]
+    return "basic"
+
+# ================= MEMORY =================
+def save_memory(uid, role, text):
+    cursor.execute("INSERT INTO memory VALUES (?,?,?)", (uid, role, text))
     conn.commit()
 
-# =====================
-# MEMORY SYSTEM
-# =====================
-def save_memory(user_id, role, content):
-    cursor.execute(
-        "INSERT INTO memory VALUES (?, ?, ?)",
-        (user_id, role, content)
-    )
-    conn.commit()
-
-def load_memory(user_id, limit=6):
-    cursor.execute(
-        "SELECT role, content FROM memory WHERE user_id=? ORDER BY rowid DESC LIMIT ?",
-        (user_id, limit)
-    )
+def load_memory(uid):
+    cursor.execute("SELECT role,content FROM memory WHERE user_id=? ORDER BY rowid DESC LIMIT 6", (uid,))
     rows = cursor.fetchall()
+    return list(reversed([{"role": r[0], "content": r[1]} for r in rows]))
 
-    return list(reversed([
-        {"role": r[0], "content": r[1]} for r in rows
-    ]))
-
-# =====================
-# SAFE SEND
-# =====================
-def send(chat_id, text, keyboard=None):
-    try:
-        data = {"chat_id": chat_id, "text": text}
-        if keyboard:
-            data["reply_markup"] = keyboard
-
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json=data,
-            timeout=8
-        )
-    except:
-        pass
+# ================= SEND =================
+def send(chat_id, text, kb=None):
+    data = {"chat_id": chat_id, "text": text}
+    if kb:
+        data["reply_markup"] = kb
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=data)
 
 def send_image(chat_id, url):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            json={"chat_id": chat_id, "photo": url},
-            timeout=8
-        )
-    except:
-        pass
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                  json={"chat_id": chat_id, "photo": url})
 
-# =====================
-# UI
-# =====================
+# ================= KEYBOARD =================
 def keyboard():
     return {
-        "keyboard": [
-            ["💬 Чат", "🖼 Картинка"],
-            ["💳 PRO", "📊 Лимиты"],
-            ["👑 Админ"]
-        ],
+        "keyboard": [["💬 Чат", "🖼 Картинка"], ["💳 PRO ⭐", "👑 Админ"]],
         "resize_keyboard": True
     }
 
-def admin_keyboard():
+def chat_keyboard():
     return {
-        "keyboard": [
-            ["📊 Статистика"],
-            ["🔙 Назад"]
-        ],
+        "keyboard": [["⚡ Быстро","🧠 Умно","📚 Подробно"],["🔙 Назад"]],
         "resize_keyboard": True
     }
 
-# =====================
-# IMAGE
-# =====================
-def make_image(prompt):
+# ================= IMAGE =================
+STYLES = {
+    "anime": "anime style, detailed",
+    "realistic": "ultra realistic, cinematic",
+    "3d": "3d render, octane"
+}
+
+def enhance_prompt(text, style="realistic"):
+    return f"{text}, {STYLES.get(style)}, high quality"
+
+def make_img(prompt):
     prompt = prompt.replace(" ", "%20")
-    return f"https://image.pollinations.ai/prompt/{prompt}, cinematic, ultra realistic"
+    return f"https://image.pollinations.ai/prompt/{prompt}"
 
-def is_image(text):
-    return any(x in text.lower() for x in ["картинка", "нарисуй", "image"])
+# ================= AI =================
+def ask_ai(uid, text):
+    save_memory(uid, "user", text)
+    hist = load_memory(uid)
 
-# =====================
-# LIVE MONITORING
-# =====================
-def get_online_users():
-    now = time.time()
-    cursor.execute("SELECT last_time FROM users")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT chat_mode FROM users WHERE user_id=?", (uid,))
+    mode = cursor.fetchone()[0]
 
-    online = 0
-    for r in rows:
-        if now - r[0] < 120:
-            online += 1
+    style = {
+        "fast": "short answer",
+        "smart": "normal answer",
+        "deep": "very detailed explanation"
+    }
 
-    return online
+    system = f"You are AI assistant. no greetings. {style.get(mode)}"
 
-# =====================
-# AI WITH MEMORY
-# =====================
-def ask_ai(user_id, text):
+    messages = [{"role":"system","content":system}] + hist
 
-    save_memory(user_id, "user", text)
-
-    history = load_memory(user_id)
-
-    messages = [
-        {
-            "role": "system",
-            "content": "Ты умный ассистент. НЕ здоровайся каждый раз. Продолжай диалог естественно."
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+        json={
+            "model":"openai/gpt-3.5-turbo",
+            "messages":messages,
+            "temperature":0.8,
+            "max_tokens":300
         }
-    ] + history
-
-    try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-            json={
-                "model": "openai/gpt-3.5-turbo",
-                "messages": messages,
-                "temperature": 0.8,
-                "max_tokens": 300
-            },
-            timeout=12
-        )
-
-        answer = r.json()["choices"][0]["message"]["content"]
-
-        save_memory(user_id, "assistant", answer)
-
-        return answer
-
-    except:
-        return "AI error"
-
-# =====================
-# LIMIT CHECK
-# =====================
-def check_limits(user):
-    now = time.time()
-
-    messages, images, last_time, plan = user[1:]
-
-    msg_limit, _ = limits(plan)
-
-    if messages >= msg_limit:
-        return False
-
-    cursor.execute("""
-        UPDATE users
-        SET messages = messages + 1,
-            last_time = ?
-        WHERE user_id=?
-    """, (now, user[0]))
-
-    conn.commit()
-    return True
-
-def check_image(user):
-    now = time.time()
-
-    _, messages, images, last_time, plan = user
-
-    _, img_limit = limits(plan)
-
-    if images >= img_limit:
-        return False
-
-    cursor.execute("""
-        UPDATE users
-        SET images = images + 1,
-            last_time = ?
-        WHERE user_id=?
-    """, (now, user[0]))
-
-    conn.commit()
-    return True
-
-# =====================
-# ADMIN
-# =====================
-def is_admin(chat_id):
-    return str(chat_id) == str(ADMIN_ID)
-
-def admin_stats(chat_id):
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM users WHERE plan='pro'")
-    pro = cursor.fetchone()[0]
-
-    cursor.execute("SELECT SUM(messages) FROM users")
-    msg = cursor.fetchone()[0] or 0
-
-    cursor.execute("SELECT SUM(images) FROM users")
-    img = cursor.fetchone()[0] or 0
-
-    online = get_online_users()
-
-    send(chat_id,
-        f"📊 STATS\n\n👥 users: {users}\n🟢 online: {online}\n💎 pro: {pro}\n💬 msgs: {msg}\n🖼 imgs: {img}",
-        admin_keyboard()
     )
 
-# =====================
-# ROUTER
-# =====================
-def router(text, chat_id, user):
+    ans = r.json()["choices"][0]["message"]["content"]
+    save_memory(uid, "assistant", ans)
+    return ans
 
-    if text == "/start":
-        send(chat_id, "🤖 NeoHelper v42 CORE", keyboard())
-        return True
+# ================= LIMITS =================
+def check_limits(user):
+    plan = get_plan(user)
+    msg_limit = PLANS[plan]["messages"]
 
-    if text == "👑 Админ":
-        if not is_admin(chat_id):
-            send(chat_id, "⛔ нет доступа")
-            return True
-        send(chat_id, "👑 Админ панель", admin_keyboard())
-        return True
+    if user[1] >= msg_limit:
+        return False
 
-    if text == "🔙 Назад":
-        send(chat_id, "Главное меню", keyboard())
-        return True
+    cursor.execute("UPDATE users SET messages=messages+1 WHERE user_id=?", (user[0],))
+    conn.commit()
+    return True
 
-    if text == "📊 Статистика":
-        if is_admin(chat_id):
-            admin_stats(chat_id)
-        return True
+def check_img(user):
+    plan = get_plan(user)
+    img_limit = PLANS[plan]["images"]
 
-    if text == "💬 Чат":
-        send(chat_id, "Пиши сообщение 👇", keyboard())
-        return True
+    if user[2] >= img_limit:
+        return False
 
-    if text == "🖼 Картинка":
-        send(chat_id, "Опиши картинку 🎨", keyboard())
-        return True
+    cursor.execute("UPDATE users SET images=images+1 WHERE user_id=?", (user[0],))
+    conn.commit()
+    return True
 
-    if text == "💳 PRO":
-        send(chat_id, "⭐ PRO через Telegram Stars (подключено логически)")
-        return True
+# ================= PAYMENT =================
+def send_invoice(chat_id, plan="pro"):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendInvoice",
+        json={
+            "chat_id": chat_id,
+            "title": f"{plan.upper()} plan",
+            "description": "AI access",
+            "payload": plan,
+            "currency": "XTR",
+            "prices":[{"label":plan,"amount":PLANS[plan]["price"]}]
+        }
+    )
 
-    if text == "📊 Лимиты":
-        msg, img = limits(user[3])
-        send(chat_id, f"💬 {msg}\n🖼 {img}", keyboard())
-        return True
+# ================= ADMIN =================
+def is_admin(uid):
+    return str(uid) == ADMIN_ID
 
-    return False
+def give_pro(uid, plan="pro"):
+    end = time.time() + 30*86400
+    cursor.execute("UPDATE users SET plan=?, subscription_end=? WHERE user_id=?",
+                   (plan, end, uid))
+    conn.commit()
 
-# =====================
-# WEBHOOK
-# =====================
+# ================= ROUTER =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
-    data = request.get_json()
-    if not data:
-        return "ok"
-
+    data = request.json
     msg = data.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
+    chat_id = str(msg.get("chat", {}).get("id"))
     text = msg.get("text", "")
-    user_id = str(chat_id)
 
-    if not chat_id:
+    register(chat_id)
+    user = get_user(chat_id)
+
+    # PAYMENT
+    if "successful_payment" in msg:
+        payload = msg["successful_payment"]["invoice_payload"]
+        give_pro(chat_id, payload)
+        send(chat_id, "💎 PRO активирован!")
         return "ok"
 
-    register(user_id)
-    user = get_user(user_id)
-
-    if router(text, chat_id, user):
+    if text == "/start":
+        send(chat_id, "🤖 v43 SaaS", keyboard())
         return "ok"
 
-    if is_image(text):
-        if check_image(user):
-            send_image(chat_id, make_image(text))
-        else:
-            send(chat_id, "🚫 лимит картинок")
+    if text == "💳 PRO ⭐":
+        send_invoice(chat_id, "pro")
         return "ok"
 
+    if text == "💬 Чат":
+        send(chat_id, "чат режим", chat_keyboard())
+        return "ok"
+
+    if text == "🖼 Картинка":
+        cursor.execute("UPDATE users SET image_mode=1 WHERE user_id=?", (chat_id,))
+        conn.commit()
+        send(chat_id, "режим картинки включён", keyboard())
+        return "ok"
+
+    if text == "👑 Админ" and is_admin(chat_id):
+        send(chat_id, "admin panel")
+        return "ok"
+
+    # IMAGE MODE
+    cursor.execute("SELECT image_mode FROM users WHERE user_id=?", (chat_id,))
+    im = cursor.fetchone()[0]
+
+    if im == 1:
+        if check_img(user):
+            prompt = enhance_prompt(text)
+            send_image(chat_id, make_img(prompt))
+            cursor.execute("UPDATE users SET image_mode=0 WHERE user_id=?", (chat_id,))
+            conn.commit()
+        return "ok"
+
+    # CHAT
     if check_limits(user):
-        reply = ask_ai(user_id, text)
+        reply = ask_ai(chat_id, text)
         send(chat_id, reply, keyboard())
     else:
-        send(chat_id, "🚫 лимит 40/день")
+        send(chat_id, "limit")
 
     return "ok"
 
-# =====================
-# HOME
-# =====================
 @app.route("/")
 def home():
-    return "NeoHelper v42 CORE ONLINE"
+    return "v43 SaaS ONLINE"
 
-# =====================
-# RUN
-# =====================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
