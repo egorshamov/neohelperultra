@@ -13,15 +13,24 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 
-DAILY_LIMIT = 30
-COOLDOWN = 3.5
-IMAGE_LIMIT = 1
+COOLDOWN = 3
 
 # =====================
 # DB
 # =====================
 conn = sqlite3.connect("neohelper.db", check_same_thread=False)
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    messages INTEGER DEFAULT 0,
+    last_time REAL DEFAULT 0,
+    image_used INTEGER DEFAULT 0,
+    image_reset REAL DEFAULT 0,
+    last_reply TEXT DEFAULT ''
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memory (
@@ -31,111 +40,44 @@ CREATE TABLE IF NOT EXISTS memory (
 )
 """)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    messages INTEGER DEFAULT 0,
-    last_time REAL DEFAULT 0,
-    images INTEGER DEFAULT 0,
-    image_time REAL DEFAULT 0
-)
-""")
-
 conn.commit()
-
-# =====================
-# UI
-# =====================
-def keyboard(user_id):
-    is_admin = str(user_id) == ADMIN_ID
-
-    buttons = [
-        [
-            {"text": "👤 Профиль", "callback_data": "profile"},
-            {"text": "🆕 Новый чат", "callback_data": "new"}
-        ]
-    ]
-
-    if is_admin:
-        buttons.insert(0, [
-            {"text": "📊 Админ панель", "callback_data": "admin"}
-        ])
-
-    return {"inline_keyboard": buttons}
-
-# =====================
-# SEND TEXT
-# =====================
-def send(chat_id, text, user_id):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "reply_markup": keyboard(user_id)
-            },
-            timeout=10
-        )
-    except:
-        pass
-
-# =====================
-# SEND IMAGE
-# =====================
-def send_image(chat_id, url):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            json={
-                "chat_id": chat_id,
-                "photo": url,
-                "caption": "🖼 NeoHelper AI"
-            },
-            timeout=10
-        )
-    except:
-        pass
 
 # =====================
 # USER
 # =====================
 def get_user(user_id):
     cursor.execute(
-        "SELECT messages, last_time, images, image_time FROM users WHERE user_id=?",
+        "SELECT messages, last_time, image_used, image_reset, last_reply FROM users WHERE user_id=?",
         (user_id,)
     )
     return cursor.fetchone()
 
 def register(user_id):
     if not get_user(user_id):
-        cursor.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
-            (user_id, 0, 0, 0, 0)
-        )
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
+                       (user_id, 0, 0, 0, 0, ""))
         conn.commit()
+
+def is_admin(user_id):
+    return str(user_id) == ADMIN_ID
 
 # =====================
 # LIMITS
 # =====================
-def check_message_limit(user_id):
-
-    if str(user_id) == ADMIN_ID:
+def check_limit(user_id):
+    if is_admin(user_id):
         return None
 
     user = get_user(user_id)
     if not user:
         register(user_id)
-        user = (0, 0, 0, 0)
+        user = (0, 0, 0, 0, "")
 
-    messages, last_time, images, img_time = user
+    messages, last_time, _, _, _ = user
     now = time.time()
 
     if now - last_time < COOLDOWN:
         return "⏳ Слишком быстро"
-
-    if messages >= DAILY_LIMIT:
-        return "🚫 Лимит сообщений исчерпан (30/день)"
 
     cursor.execute("""
         UPDATE users
@@ -145,47 +87,85 @@ def check_message_limit(user_id):
     """, (now, user_id))
 
     conn.commit()
-
     return None
 
-
-def check_image_limit(user_id):
-
-    if str(user_id) == ADMIN_ID:
-        return None
+# =====================
+# IMAGE LIMIT (1/day)
+# =====================
+def can_use_image(user_id):
+    if is_admin(user_id):
+        return True
 
     user = get_user(user_id)
     if not user:
         register(user_id)
-        user = (0, 0, 0, 0)
+        return True
 
-    messages, last_time, images, img_time = user
+    _, _, img_used, img_reset, _ = user
     now = time.time()
 
-    if images >= IMAGE_LIMIT:
-        return "🚫 Лимит картинок (1/день)"
+    if now - img_reset > 86400:
+        cursor.execute("""
+            UPDATE users
+            SET image_used=0, image_reset=?
+            WHERE user_id=?
+        """, (now, user_id))
+        conn.commit()
+        return True
+
+    if img_used >= 1:
+        return False
 
     cursor.execute("""
         UPDATE users
-        SET images = images + 1,
-            image_time = ?
+        SET image_used = image_used + 1,
+            image_reset = ?
         WHERE user_id=?
     """, (now, user_id))
 
     conn.commit()
-
-    return None
+    return True
 
 # =====================
-# IMAGE AI
+# IMAGE
 # =====================
-def is_image(text):
-    keys = ["нарисуй", "картинка", "рисунок", "изобрази"]
-    return any(k in text.lower() for k in keys)
-
 def make_image(prompt):
     prompt = prompt.replace(" ", "%20")
-    return f"https://image.pollinations.ai/prompt/{prompt}"
+    return f"https://image.pollinations.ai/prompt/{prompt}, cinematic, ultra realistic"
+
+def is_image(text):
+    return any(k in text.lower() for k in ["нарисуй", "картинка", "создай", "изобрази"])
+
+# =====================
+# MEMORY (NO REPEATS)
+# =====================
+def save_memory(user_id, role, content):
+    cursor.execute("INSERT INTO memory VALUES (?, ?, ?)", (user_id, role, content))
+
+    cursor.execute("""
+        DELETE FROM memory
+        WHERE rowid NOT IN (
+            SELECT rowid FROM memory
+            WHERE user_id=?
+            ORDER BY rowid DESC
+            LIMIT 4
+        )
+        AND user_id=?
+    """, (user_id, user_id))
+
+    conn.commit()
+
+# =====================
+# ANTI REPEAT ANSWER
+# =====================
+def is_repeat(user_id, answer):
+    cursor.execute("SELECT last_reply FROM users WHERE user_id=?", (user_id,))
+    last = cursor.fetchone()[0]
+    return last == answer
+
+def save_reply(user_id, answer):
+    cursor.execute("UPDATE users SET last_reply=? WHERE user_id=?", (answer, user_id))
+    conn.commit()
 
 # =====================
 # AI
@@ -196,7 +176,7 @@ def ask_ai(user_id, text):
         SELECT role, content FROM memory
         WHERE user_id=?
         ORDER BY rowid DESC
-        LIMIT 12
+        LIMIT 4
     """, (user_id,))
 
     history = cursor.fetchall()[::-1]
@@ -204,7 +184,7 @@ def ask_ai(user_id, text):
     messages = [
         {
             "role": "system",
-            "content": "Ты NeoHelper — умный, стабильный AI помощник."
+            "content": "Ты NeoHelper — умный, краткий, не повторяющийся AI ассистент."
         }
     ]
 
@@ -220,9 +200,10 @@ def ask_ai(user_id, text):
             },
             json={
                 "model": "openai/gpt-3.5-turbo",
-                "messages": messages
+                "messages": messages,
+                "max_tokens": 250
             },
-            timeout=20
+            timeout=12
         )
 
         if r.status_code != 200:
@@ -230,52 +211,98 @@ def ask_ai(user_id, text):
 
         answer = r.json()["choices"][0]["message"]["content"]
 
-        cursor.execute(
-            "INSERT INTO memory VALUES (?, ?, ?)",
-            (user_id, "user", text)
-        )
-        cursor.execute(
-            "INSERT INTO memory VALUES (?, ?, ?)",
-            (user_id, "assistant", answer)
-        )
-        conn.commit()
+        if is_repeat(user_id, answer):
+            answer = "🤖 Я уже отвечал на это, попробуй уточнить вопрос."
 
-        return f"🤖 NeoHelper\n\n{answer}"
+        save_reply(user_id, answer)
+
+        save_memory(user_id, "user", text)
+        save_memory(user_id, "assistant", answer)
+
+        return answer
 
     except:
-        return "⚠️ Ошибка AI"
+        return "⚠️ AI error"
 
 # =====================
-# CALLBACK
+# TELEGRAM SEND
 # =====================
-def handle_cb(data, chat_id, user_id):
+def send(chat_id, text, keyboard=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if keyboard:
+        payload["reply_markup"] = keyboard
+
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json=payload,
+        timeout=8
+    )
+
+def send_image(chat_id, url):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+        json={"chat_id": chat_id, "photo": url},
+        timeout=8
+    )
+
+# =====================
+# MENU
+# =====================
+def main_menu():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💬 Чат", "callback_data": "chat"},
+                {"text": "🖼 Картинка", "callback_data": "image"}
+            ],
+            [
+                {"text": "👤 Профиль", "callback_data": "profile"},
+                {"text": "ℹ️ Инфо", "callback_data": "info"}
+            ]
+        ]
+    }
+
+# =====================
+# CALLBACK HANDLER
+# =====================
+def handle_callback(data, chat_id, user_id):
 
     if data == "profile":
-        send(chat_id, f"👤 ID: {user_id}", user_id)
+        user = get_user(user_id)
+        send(chat_id, f"👤 Профиль\n\n💬 Сообщения: {user[0]}")
+        return
 
-    elif data == "new":
-        cursor.execute("DELETE FROM memory WHERE user_id=?", (user_id,))
-        conn.commit()
-        send(chat_id, "🆕 Новый чат создан", user_id)
-
-    elif data == "admin":
-
-        if str(user_id) != ADMIN_ID:
-            send(chat_id, "⛔ Нет доступа", user_id)
-            return
-
-        cursor.execute("SELECT COUNT(*) FROM users")
-        users = cursor.fetchone()[0]
-
-        cursor.execute("SELECT SUM(messages) FROM users")
-        msgs = cursor.fetchone()[0] or 0
-
+    if data == "info":
         send(chat_id,
-            f"📊 ADMIN PANEL\n\n"
-            f"👥 Users: {users}\n"
-            f"💬 Messages: {msgs}",
-            user_id
+            "🤖 NeoHelper\n\n"
+            "💬 Чат AI\n"
+            "🖼 Генерация картинок (1/день)\n"
+            "🎤 Голос (Lite)\n"
+            "⚡ Быстрый и стабильный бот"
         )
+        return
+
+    if data == "image":
+        send(chat_id, "Напиши: 'нарисуй ...'")
+        return
+
+    if data == "chat":
+        send(chat_id, "💬 Напиши сообщение и я отвечу как AI")
+        return
+
+# =====================
+# ROUTER
+# =====================
+def router(text, user_id, chat_id):
+
+    if is_image(text):
+        if can_use_image(user_id):
+            send_image(chat_id, make_image(text))
+        else:
+            send(chat_id, "🚫 Лимит: 1 изображение в день")
+        return True
+
+    return False
 
 # =====================
 # WEBHOOK
@@ -287,52 +314,44 @@ def webhook():
     if not data:
         return "ok"
 
+    # callback buttons
+    if "callback_query" in data:
+        cq = data["callback_query"]
+        chat_id = cq["message"]["chat"]["id"]
+        user_id = str(chat_id)
+        handle_callback(cq["data"], chat_id, user_id)
+        return "ok"
+
     if "message" in data:
 
         msg = data["message"]
-
         chat_id = msg["chat"]["id"]
-        text = msg.get("text", "")
         user_id = str(chat_id)
 
         register(user_id)
 
-        # MESSAGE LIMIT
-        limit = check_message_limit(user_id)
+        # show menu always on /start
+        if msg.get("text", "") == "/start":
+            send(chat_id, "🤖 Добро пожаловать в NeoHelper", main_menu())
+            return "ok"
+
+        # limits
+        limit = check_limit(user_id)
         if limit:
-            send(chat_id, limit, user_id)
+            send(chat_id, limit)
             return "ok"
 
-        # IMAGE MODE
-        if is_image(text):
-            img_limit = check_image_limit(user_id)
-            if img_limit:
-                send(chat_id, img_limit, user_id)
-                return "ok"
+        text = msg.get("text", "")
 
-            prompt = text
-            for w in ["нарисуй", "картинка", "рисунок", "изобрази"]:
-                prompt = prompt.replace(w, "")
-
-            img_url = make_image(prompt.strip())
-            send_image(chat_id, img_url)
+        # router
+        if router(text, user_id, chat_id):
             return "ok"
 
-        # AI MODE
+        # AI
         reply = ask_ai(user_id, text)
-        send(chat_id, reply, user_id)
+        send(chat_id, reply, main_menu())
 
         return "ok"
-
-    if "callback_query" in data:
-
-        cq = data["callback_query"]
-
-        chat_id = cq["message"]["chat"]["id"]
-        user_id = str(chat_id)
-        data_cb = cq["data"]
-
-        handle_cb(data_cb, chat_id, user_id)
 
     return "ok"
 
@@ -341,7 +360,7 @@ def webhook():
 # =====================
 @app.route("/")
 def home():
-    return "🤖 NeoHelper v20 PRO STABLE ONLINE"
+    return "NeoHelper online"
 
 # =====================
 # RUN
