@@ -5,10 +5,10 @@ from flask import Flask, request
 app = Flask(__name__)
 
 # =========================
-# TOKENS
+# ENV
 # =========================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # =========================
 # MEMORY
@@ -16,10 +16,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 memory = {}
 
 # =========================
-# SEND MESSAGE TO TELEGRAM
+# SEND TELEGRAM MESSAGE
 # =========================
 def send_message(chat_id, text):
+
     try:
+
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
         r = requests.post(
@@ -34,6 +36,7 @@ def send_message(chat_id, text):
         print("TELEGRAM RESPONSE:", r.text)
 
     except Exception as e:
+
         print("SEND ERROR:", e)
 
 
@@ -59,8 +62,9 @@ def ask_ai(user_id, text):
     # ограничение памяти
     history = history[-10:]
 
+    # ✅ ПРАВИЛЬНЫЙ GEMINI URL
     url = (
-        "https://generativelanguage.googleapis.com/v1/"
+        "https://generativelanguage.googleapis.com/v1beta/"
         f"models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
 
@@ -101,7 +105,7 @@ def ask_ai(user_id, text):
 
         print("AI ANSWER:", answer)
 
-        # сохраняем память
+        # память
         history.append({
             "role": "model",
             "parts": [
@@ -116,7 +120,9 @@ def ask_ai(user_id, text):
         return answer
 
     except Exception as e:
+
         print("AI ERROR:", e)
+
         return f"⚠️ AI ERROR: {e}"
 
 
@@ -126,13 +132,15 @@ def ask_ai(user_id, text):
 def handle_commands(text, user_id):
 
     if text == "/start":
+
         return (
             "🤖 NeoHelper v7\n\n"
-            "Бот работает.\n"
-            "Просто напиши сообщение."
+            "AI бот работает.\n"
+            "Напиши сообщение."
         )
 
     if text == "/help":
+
         return (
             "/start - запуск\n"
             "/help - помощь\n"
@@ -140,7 +148,9 @@ def handle_commands(text, user_id):
         )
 
     if text == "/clear":
+
         memory[user_id] = []
+
         return "🧠 Память очищена"
 
     return None
@@ -200,6 +210,7 @@ def webhook():
 # =========================
 @app.route("/")
 def home():
+
     return "🤖 NeoHelper v7 ONLINE"
 
 
