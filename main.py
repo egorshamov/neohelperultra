@@ -4,6 +4,11 @@ import requests
 
 from flask import Flask, request
 
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 app = Flask(__name__)
 
 # ====================================
@@ -22,6 +27,7 @@ conn = sqlite3.connect(
 
 cursor = conn.cursor()
 
+# MEMORY TABLE
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memory (
     user_id TEXT,
@@ -30,7 +36,74 @@ CREATE TABLE IF NOT EXISTS memory (
 )
 """)
 
+# USERS TABLE
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT,
+    messages INTEGER
+)
+""")
+
 conn.commit()
+
+# ====================================
+# MAIN MENU
+# ====================================
+def main_menu():
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "💬 Новый чат",
+                callback_data="new_chat"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🧠 Очистить память",
+                callback_data="clear_memory"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "👤 Профиль",
+                callback_data="profile"
+            ),
+
+            InlineKeyboardButton(
+                "ℹ️ Помощь",
+                callback_data="help"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ====================================
+# REGISTER USER
+# ====================================
+def register_user(user_id):
+
+    cursor.execute(
+        "SELECT * FROM users WHERE user_id=?",
+        (user_id,)
+    )
+
+    user = cursor.fetchone()
+
+    if not user:
+
+        cursor.execute(
+            "INSERT INTO users VALUES (?, ?)",
+            (user_id, 0)
+        )
+
+        conn.commit()
+
 
 # ====================================
 # SEND MESSAGE
@@ -48,7 +121,8 @@ def send_message(chat_id, text):
             url,
             json={
                 "chat_id": chat_id,
-                "text": text
+                "text": text,
+                "reply_markup": main_menu().to_dict()
             },
             timeout=10
         )
@@ -93,7 +167,20 @@ def ask_ai(user_id, text):
     if not OPENROUTER_API_KEY:
         return "❌ OPENROUTER_API_KEY not found"
 
-    # сохраняем сообщение пользователя
+    register_user(user_id)
+
+    cursor.execute(
+        """
+        UPDATE users
+        SET messages = messages + 1
+        WHERE user_id=?
+        """,
+        (user_id,)
+    )
+
+    conn.commit()
+
+    # SAVE USER MESSAGE
     cursor.execute(
         "INSERT INTO memory VALUES (?, ?, ?)",
         (user_id, "user", text)
@@ -101,7 +188,7 @@ def ask_ai(user_id, text):
 
     conn.commit()
 
-    # загружаем историю
+    # LOAD HISTORY
     cursor.execute(
         """
         SELECT role, content
@@ -123,12 +210,12 @@ def ask_ai(user_id, text):
     messages.append({
         "role": "system",
         "content": (
-            "Ты NeoHelper — умный Telegram AI помощник. "
-            "Отвечай кратко, дружелюбно и полезно."
+            "Ты NeoHelper — умный AI помощник. "
+            "Отвечай дружелюбно, красиво и полезно."
         )
     })
 
-    # память
+    # MEMORY
     for role, content in rows:
 
         messages.append({
@@ -174,9 +261,7 @@ def ask_ai(user_id, text):
             ["message"]["content"]
         )
 
-        print("AI ANSWER:", answer)
-
-        # сохраняем ответ AI
+        # SAVE AI RESPONSE
         cursor.execute(
             "INSERT INTO memory VALUES (?, ?, ?)",
             (user_id, "assistant", answer)
@@ -184,7 +269,7 @@ def ask_ai(user_id, text):
 
         conn.commit()
 
-        return answer
+        return f"🤖 NeoHelper\n\n{answer}"
 
     except Exception as e:
 
@@ -201,17 +286,23 @@ def handle_commands(text, user_id):
     if text == "/start":
 
         return (
-            "🤖 NeoHelper v9\n\n"
-            "AI бот работает.\n"
-            "Напиши сообщение."
+            "┏━━━━━━━━━━━━━┓\n"
+            "   🤖 NeoHelper AI\n"
+            "┗━━━━━━━━━━━━━┛\n\n"
+            "🧠 Умный Telegram AI\n"
+            "⚡ Powered by OpenRouter\n"
+            "🌐 Render Cloud Online\n\n"
+            "Выберите действие 👇"
         )
 
     if text == "/help":
 
         return (
+            "ℹ️ HELP\n\n"
             "/start - запуск\n"
             "/help - помощь\n"
-            "/clear - очистить память"
+            "/clear - очистить память\n"
+            "/profile - профиль"
         )
 
     if text == "/clear":
@@ -224,6 +315,27 @@ def handle_commands(text, user_id):
         conn.commit()
 
         return "🧠 Память очищена"
+
+    if text == "/profile":
+
+        register_user(user_id)
+
+        cursor.execute(
+            "SELECT messages FROM users WHERE user_id=?",
+            (user_id,)
+        )
+
+        result = cursor.fetchone()
+
+        messages = result[0]
+
+        return (
+            "╔══ 👤 PROFILE ══╗\n\n"
+            f"🆔 ID: {user_id}\n"
+            f"💬 Messages: {messages}\n"
+            "⭐ Status: User\n\n"
+            "╚═══════════════╝"
+        )
 
     return None
 
@@ -256,10 +368,10 @@ def webhook():
 
         user_id = str(chat_id)
 
-        # typing effect
+        # TYPING EFFECT
         send_typing(chat_id)
 
-        # commands
+        # COMMANDS
         cmd = handle_commands(
             text,
             user_id
@@ -271,7 +383,7 @@ def webhook():
 
             return "ok", 200
 
-        # AI answer
+        # AI RESPONSE
         reply = ask_ai(user_id, text)
 
         send_message(chat_id, reply)
@@ -291,7 +403,7 @@ def webhook():
 @app.route("/")
 def home():
 
-    return "🤖 NeoHelper v9 ONLINE"
+    return "🤖 NeoHelper v11 ONLINE"
 
 
 # ====================================
