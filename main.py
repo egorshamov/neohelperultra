@@ -1,5 +1,7 @@
 import os
+import sqlite3
 import requests
+
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -11,23 +13,39 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # ====================================
-# MEMORY
+# DATABASE
 # ====================================
-memory = {}
+conn = sqlite3.connect(
+    "neohelper.db",
+    check_same_thread=False
+)
+
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memory (
+    user_id TEXT,
+    role TEXT,
+    content TEXT
+)
+""")
+
+conn.commit()
 
 # ====================================
-# SEND MESSAGE TO TELEGRAM
+# SEND MESSAGE
 # ====================================
 def send_message(chat_id, text):
 
     try:
 
-        telegram_url = (
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        url = (
+            f"https://api.telegram.org/"
+            f"bot{BOT_TOKEN}/sendMessage"
         )
 
         response = requests.post(
-            telegram_url,
+            url,
             json={
                 "chat_id": chat_id,
                 "text": text
@@ -35,7 +53,7 @@ def send_message(chat_id, text):
             timeout=10
         )
 
-        print("TELEGRAM RESPONSE:", response.text)
+        print("TELEGRAM:", response.text)
 
     except Exception as e:
 
@@ -43,49 +61,111 @@ def send_message(chat_id, text):
 
 
 # ====================================
-# AI FUNCTION (OPENROUTER)
+# TYPING EFFECT
+# ====================================
+def send_typing(chat_id):
+
+    try:
+
+        url = (
+            f"https://api.telegram.org/"
+            f"bot{BOT_TOKEN}/sendChatAction"
+        )
+
+        requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "action": "typing"
+            },
+            timeout=5
+        )
+
+    except:
+        pass
+
+
+# ====================================
+# AI FUNCTION
 # ====================================
 def ask_ai(user_id, text):
 
     if not OPENROUTER_API_KEY:
         return "❌ OPENROUTER_API_KEY not found"
 
-    history = memory.get(user_id, [])
+    # сохраняем сообщение пользователя
+    cursor.execute(
+        "INSERT INTO memory VALUES (?, ?, ?)",
+        (user_id, "user", text)
+    )
 
-    history.append({
-        "role": "user",
-        "content": text
+    conn.commit()
+
+    # загружаем историю
+    cursor.execute(
+        """
+        SELECT role, content
+        FROM memory
+        WHERE user_id=?
+        ORDER BY rowid DESC
+        LIMIT 10
+        """,
+        (user_id,)
+    )
+
+    rows = cursor.fetchall()
+
+    rows.reverse()
+
+    messages = []
+
+    # SYSTEM PROMPT
+    messages.append({
+        "role": "system",
+        "content": (
+            "Ты NeoHelper — умный Telegram AI помощник. "
+            "Отвечай кратко, дружелюбно и полезно."
+        )
     })
 
-    # ограничение памяти
-    history = history[-10:]
+    # память
+    for role, content in rows:
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
+        messages.append({
+            "role": role,
+            "content": content
+        })
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": (
+            f"Bearer {OPENROUTER_API_KEY}"
+        ),
         "Content-Type": "application/json"
     }
 
     data = {
         "model": "openai/gpt-3.5-turbo",
-        "messages": history
+        "messages": messages
     }
 
     try:
 
         response = requests.post(
-            url,
+            "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=data,
             timeout=30
         )
 
         print("AI STATUS:", response.status_code)
-        print("AI RAW:", response.text)
 
         if response.status_code != 200:
-            return f"⚠️ AI HTTP Error {response.status_code}"
+
+            print(response.text)
+
+            return (
+                f"⚠️ AI Error {response.status_code}"
+            )
 
         result = response.json()
 
@@ -96,13 +176,13 @@ def ask_ai(user_id, text):
 
         print("AI ANSWER:", answer)
 
-        # сохраняем память
-        history.append({
-            "role": "assistant",
-            "content": answer
-        })
+        # сохраняем ответ AI
+        cursor.execute(
+            "INSERT INTO memory VALUES (?, ?, ?)",
+            (user_id, "assistant", answer)
+        )
 
-        memory[user_id] = history
+        conn.commit()
 
         return answer
 
@@ -121,9 +201,9 @@ def handle_commands(text, user_id):
     if text == "/start":
 
         return (
-            "🤖 NeoHelper v8\n\n"
-            "AI бот успешно работает.\n"
-            "Напиши любое сообщение."
+            "🤖 NeoHelper v9\n\n"
+            "AI бот работает.\n"
+            "Напиши сообщение."
         )
 
     if text == "/help":
@@ -136,7 +216,12 @@ def handle_commands(text, user_id):
 
     if text == "/clear":
 
-        memory[user_id] = []
+        cursor.execute(
+            "DELETE FROM memory WHERE user_id=?",
+            (user_id,)
+        )
+
+        conn.commit()
 
         return "🧠 Память очищена"
 
@@ -153,7 +238,7 @@ def webhook():
 
         data = request.get_json()
 
-        print("WEBHOOK DATA:", data)
+        print("WEBHOOK:", data)
 
         if not data:
             return "ok", 200
@@ -167,12 +252,18 @@ def webhook():
 
         text = message.get("text", "")
 
-        print("USER MESSAGE:", text)
+        print("USER:", text)
 
         user_id = str(chat_id)
 
-        # команды
-        cmd = handle_commands(text, user_id)
+        # typing effect
+        send_typing(chat_id)
+
+        # commands
+        cmd = handle_commands(
+            text,
+            user_id
+        )
 
         if cmd:
 
@@ -180,7 +271,7 @@ def webhook():
 
             return "ok", 200
 
-        # AI ответ
+        # AI answer
         reply = ask_ai(user_id, text)
 
         send_message(chat_id, reply)
@@ -200,7 +291,7 @@ def webhook():
 @app.route("/")
 def home():
 
-    return "🤖 NeoHelper v8 ONLINE"
+    return "🤖 NeoHelper v9 ONLINE"
 
 
 # ====================================
@@ -208,7 +299,9 @@ def home():
 # ====================================
 if __name__ == "__main__":
 
-    port = int(os.environ.get("PORT", 10000))
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
 
     app.run(
         host="0.0.0.0",
