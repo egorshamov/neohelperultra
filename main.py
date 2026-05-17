@@ -4,28 +4,30 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# =========================
-# ENV
-# =========================
+# ====================================
+# ENV VARIABLES
+# ====================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# =========================
+# ====================================
 # MEMORY
-# =========================
+# ====================================
 memory = {}
 
-# =========================
+# ====================================
 # SEND TELEGRAM MESSAGE
-# =========================
+# ====================================
 def send_message(chat_id, text):
 
     try:
 
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        telegram_url = (
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        )
 
-        r = requests.post(
-            url,
+        response = requests.post(
+            telegram_url,
             json={
                 "chat_id": chat_id,
                 "text": text
@@ -33,16 +35,16 @@ def send_message(chat_id, text):
             timeout=10
         )
 
-        print("TELEGRAM RESPONSE:", r.text)
+        print("TELEGRAM RESPONSE:", response.text)
 
     except Exception as e:
 
         print("SEND ERROR:", e)
 
 
-# =========================
+# ====================================
 # GEMINI AI
-# =========================
+# ====================================
 def ask_ai(user_id, text):
 
     if not GEMINI_API_KEY:
@@ -59,34 +61,34 @@ def ask_ai(user_id, text):
         ]
     })
 
-    # ограничение памяти
+    # память ограничиваем
     history = history[-10:]
 
-    # ✅ ПРАВИЛЬНЫЙ GEMINI URL
-    url = (
+    # ✅ НОВЫЙ СТАБИЛЬНЫЙ GEMINI URL
+    gemini_url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        f"models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
     )
 
-    data = {
+    payload = {
         "contents": history
     }
 
     try:
 
-        r = requests.post(
-            url,
-            json=data,
+        response = requests.post(
+            gemini_url,
+            json=payload,
             timeout=20
         )
 
-        print("GEMINI STATUS:", r.status_code)
-        print("GEMINI RAW:", r.text)
+        print("GEMINI STATUS:", response.status_code)
+        print("GEMINI RAW:", response.text)
 
-        if r.status_code != 200:
-            return f"⚠️ Gemini HTTP Error {r.status_code}"
+        if response.status_code != 200:
+            return f"⚠️ Gemini HTTP Error {response.status_code}"
 
-        result = r.json()
+        result = response.json()
 
         if "error" in result:
             return f"⚠️ Gemini Error: {result['error']}"
@@ -105,7 +107,7 @@ def ask_ai(user_id, text):
 
         print("AI ANSWER:", answer)
 
-        # память
+        # сохраняем память
         history.append({
             "role": "model",
             "parts": [
@@ -126,17 +128,17 @@ def ask_ai(user_id, text):
         return f"⚠️ AI ERROR: {e}"
 
 
-# =========================
+# ====================================
 # COMMANDS
-# =========================
+# ====================================
 def handle_commands(text, user_id):
 
     if text == "/start":
 
         return (
             "🤖 NeoHelper v7\n\n"
-            "AI бот работает.\n"
-            "Напиши сообщение."
+            "AI бот успешно работает.\n"
+            "Просто напиши сообщение."
         )
 
     if text == "/help":
@@ -156,9 +158,9 @@ def handle_commands(text, user_id):
     return None
 
 
-# =========================
+# ====================================
 # WEBHOOK
-# =========================
+# ====================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
@@ -188,7 +190,9 @@ def webhook():
         cmd = handle_commands(text, user_id)
 
         if cmd:
+
             send_message(chat_id, cmd)
+
             return "ok", 200
 
         # AI ответ
@@ -205,18 +209,18 @@ def webhook():
         return "ok", 200
 
 
-# =========================
+# ====================================
 # HOME
-# =========================
+# ====================================
 @app.route("/")
 def home():
 
     return "🤖 NeoHelper v7 ONLINE"
 
 
-# =========================
+# ====================================
 # RUN
-# =========================
+# ====================================
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 10000))
