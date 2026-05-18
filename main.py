@@ -17,7 +17,6 @@ ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# USERS
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -31,7 +30,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MEMORY
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +39,6 @@ CREATE TABLE IF NOT EXISTS memory (
 )
 """)
 
-# LOGS
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,8 +67,7 @@ PLANS = {
 def ensure_user(chat_id):
 
     cursor.execute("""
-    SELECT user_id
-    FROM users
+    SELECT user_id FROM users
     WHERE user_id=?
     """, (chat_id,))
 
@@ -123,7 +119,6 @@ def save_memory(chat_id, role, content):
 
     conn.commit()
 
-    # LIMIT MEMORY
     cursor.execute("""
     SELECT id
     FROM memory
@@ -181,9 +176,7 @@ def reset_limits_if_needed(chat_id):
 
     if row:
 
-        last_reset = row[0]
-
-        if time.time() - last_reset > 86400:
+        if time.time() - row[0] > 86400:
 
             cursor.execute("""
             UPDATE users
@@ -323,7 +316,7 @@ def ask_ai(chat_id, text):
         system = """
 Ты NeoHelper AI ассистент.
 Всегда отвечай только на русском языке.
-Будь полезным, умным и современным.
+Будь полезным и умным.
 """
 
         if mode == "fast":
@@ -343,7 +336,10 @@ def ask_ai(chat_id, text):
             "content": system
         }]
 
-        messages += load_memory(chat_id)
+        try:
+            messages += load_memory(chat_id)
+        except:
+            pass
 
         messages.append({
             "role": "user",
@@ -359,27 +355,44 @@ def ask_ai(chat_id, text):
             },
 
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "llama3-8b-8192",
                 "messages": messages,
                 "temperature": 0.7,
-                "max_tokens": 1200
+                "max_tokens": 1000
             },
 
             timeout=60
         )
 
-        if r.status_code != 200:
-            print(r.text)
-            return "⚠️ AI сервер временно недоступен"
+        print("STATUS:", r.status_code)
+        print("TEXT:", r.text)
 
-        data = r.json()
+        if r.status_code != 200:
+            return f"⚠️ AI ERROR {r.status_code}"
+
+        try:
+            data = r.json()
+        except:
+            return "⚠️ Ошибка JSON"
+
+        if "choices" not in data:
+            return "⚠️ Нет choices"
+
+        if not data["choices"]:
+            return "⚠️ Пустой ответ"
 
         reply = data["choices"][0]["message"]["content"]
 
-        save_memory(chat_id, "user", text)
-        save_memory(chat_id, "assistant", reply)
+        try:
+            save_memory(chat_id, "user", text)
+            save_memory(chat_id, "assistant", reply)
+        except:
+            pass
 
-        add_log(chat_id, "ai_message")
+        try:
+            add_log(chat_id, "ai_message")
+        except:
+            pass
 
         return reply
 
@@ -387,9 +400,7 @@ def ask_ai(chat_id, text):
 
         print("AI ERROR:", e)
 
-        add_log(chat_id, "ai_error")
-
-        return "⚠️ Ошибка AI"
+        return "⚠️ Ошибка подключения AI"
 
 # ================= IMAGE =================
 
@@ -400,8 +411,6 @@ IMAGE_STYLES = {
 }
 
 def generate_image(prompt, style):
-
-    prompt = prompt.strip()
 
     enhanced = f"""
 {prompt},
@@ -497,10 +506,6 @@ def admin_keyboard():
     return {
         "keyboard": [
             ["📊 Статистика"],
-            ["💎 Выдать PRO"],
-            ["💎 Выдать ULTRA"],
-            ["🚫 Бан"],
-            ["✅ Разбан"],
             ["🔙 Назад"]
         ],
         "resize_keyboard": True
@@ -536,14 +541,11 @@ def webhook():
 
         if not check_spam(chat_id):
 
-            send(
-                chat_id,
-                "⏳ Слишком быстро"
-            )
+            send(chat_id, "⏳ Слишком быстро")
 
             return "ok"
 
-        # ================= START =================
+        # START
 
         if text == "/start":
 
@@ -557,13 +559,13 @@ def webhook():
 
             return "ok"
 
-        # ================= CHAT =================
+        # CHAT
 
         if text == "💬 Чат":
 
             send(
                 chat_id,
-                "💬 Выбери режим чата",
+                "💬 Выбери режим",
                 chat_keyboard()
             )
 
@@ -579,11 +581,7 @@ def webhook():
 
             conn.commit()
 
-            send(
-                chat_id,
-                "⚡ Быстрый режим включён",
-                keyboard(chat_id)
-            )
+            send(chat_id, "⚡ Быстрый режим", keyboard(chat_id))
 
             return "ok"
 
@@ -597,11 +595,7 @@ def webhook():
 
             conn.commit()
 
-            send(
-                chat_id,
-                "🧠 Умный режим включён",
-                keyboard(chat_id)
-            )
+            send(chat_id, "🧠 Умный режим", keyboard(chat_id))
 
             return "ok"
 
@@ -615,26 +609,17 @@ def webhook():
 
             conn.commit()
 
-            send(
-                chat_id,
-                "📚 Подробный режим включён",
-                keyboard(chat_id)
-            )
+            send(chat_id, "📚 Подробный режим", keyboard(chat_id))
 
             return "ok"
 
-        # ================= PRO AI =================
+        # PRO AI
 
         if text == "🧠 PRO AI":
 
-            plan = get_plan(chat_id)
+            if get_plan(chat_id) == "basic":
 
-            if plan == "basic":
-
-                send(
-                    chat_id,
-                    "🚫 PRO AI доступен только для PRO"
-                )
+                send(chat_id, "🚫 Только для PRO")
 
                 return "ok"
 
@@ -646,15 +631,11 @@ def webhook():
 
             conn.commit()
 
-            send(
-                chat_id,
-                "🧠 PRO AI активирован",
-                keyboard(chat_id)
-            )
+            send(chat_id, "🧠 PRO AI включён", keyboard(chat_id))
 
             return "ok"
 
-        # ================= IMAGE =================
+        # IMAGE
 
         if text == "🖼 Картинка":
 
@@ -668,13 +649,13 @@ def webhook():
 
         if text in ["🎨 anime", "📸 realistic", "🧊 3d"]:
 
-            style_map = {
+            styles = {
                 "🎨 anime": "anime",
                 "📸 realistic": "realistic",
                 "🧊 3d": "3d"
             }
 
-            style = style_map[text]
+            style = styles[text]
 
             cursor.execute("""
             UPDATE users
@@ -686,12 +667,12 @@ def webhook():
 
             send(
                 chat_id,
-                f"🎨 Стиль {style} выбран\n\nТеперь отправь описание картинки"
+                f"🎨 Стиль {style} выбран\n\nОтправь описание картинки"
             )
 
             return "ok"
 
-        # ================= LIMITS =================
+        # LIMITS
 
         if text == "📊 Лимиты":
 
@@ -705,19 +686,16 @@ def webhook():
 
             row = cursor.fetchone()
 
-            used_messages = row[0]
-            used_images = row[1]
-
             send(
                 chat_id,
                 f"""
 📊 Лимиты
 
 💬 Сообщения:
-{used_messages}/{PLANS[plan]["messages"]}
+{row[0]}/{PLANS[plan]["messages"]}
 
 🖼 Картинки:
-{used_images}/{PLANS[plan]["images"]}
+{row[1]}/{PLANS[plan]["images"]}
 
 💎 План:
 {plan}
@@ -727,7 +705,7 @@ def webhook():
 
             return "ok"
 
-        # ================= ADMIN =================
+        # ADMIN
 
         if text == "👑 Админ" and is_admin(chat_id):
 
@@ -744,24 +722,7 @@ def webhook():
             cursor.execute("SELECT COUNT(*) FROM users")
             users = cursor.fetchone()[0]
 
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM users
-            WHERE plan='pro'
-            """)
-            pro = cursor.fetchone()[0]
-
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM users
-            WHERE plan='ultra'
-            """)
-            ultra = cursor.fetchone()[0]
-
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM logs
-            """)
+            cursor.execute("SELECT COUNT(*) FROM logs")
             logs = cursor.fetchone()[0]
 
             send(
@@ -770,56 +731,47 @@ def webhook():
 📊 Статистика
 
 👥 Пользователи: {users}
-💎 PRO: {pro}
-🚀 ULTRA: {ultra}
 📝 Логи: {logs}
 """
             )
 
             return "ok"
 
-        # ================= BACK =================
+        # BACK
 
         if text == "🔙 Назад":
 
-            send(
-                chat_id,
-                "🏠 Главное меню",
-                keyboard(chat_id)
-            )
+            send(chat_id, "🏠 Главное меню", keyboard(chat_id))
 
             return "ok"
 
-        # ================= IMAGE GENERATION =================
-
-        cursor.execute("""
-        SELECT image_style
-        FROM users
-        WHERE user_id=?
-        """, (chat_id,))
-
-        style_row = cursor.fetchone()
-
-        style = style_row[0] if style_row else "realistic"
+        # IMAGE GENERATION
 
         image_words = [
             "нарисуй",
             "создай",
             "картинка",
-            "image",
-            "draw"
+            "draw",
+            "image"
         ]
 
         if any(word in text.lower() for word in image_words):
 
             if not check_image_limit(chat_id):
 
-                send(
-                    chat_id,
-                    "🚫 Лимит картинок"
-                )
+                send(chat_id, "🚫 Лимит картинок")
 
                 return "ok"
+
+            cursor.execute("""
+            SELECT image_style
+            FROM users
+            WHERE user_id=?
+            """, (chat_id,))
+
+            row = cursor.fetchone()
+
+            style = row[0] if row else "realistic"
 
             photo = generate_image(text, style)
 
@@ -829,26 +781,19 @@ def webhook():
 
             return "ok"
 
-        # ================= AI LIMIT =================
+        # AI LIMIT
 
         if not check_message_limit(chat_id):
 
-            send(
-                chat_id,
-                "🚫 Лимит сообщений"
-            )
+            send(chat_id, "🚫 Лимит сообщений")
 
             return "ok"
 
-        # ================= AI =================
+        # AI
 
         reply = ask_ai(chat_id, text)
 
-        send(
-            chat_id,
-            reply,
-            keyboard(chat_id)
-        )
+        send(chat_id, reply, keyboard(chat_id))
 
         return "ok"
 
