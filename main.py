@@ -444,9 +444,9 @@ def ask_ai(chat_id, text):
         mode = row[0] if row else "smart"
 
         system = """
-Ты современный AI ассистент.
-Всегда отвечай на русском языке.
-Будь полезным и умным.
+Ты NeoHelper AI ассистент.
+Всегда отвечай только на русском языке.
+Будь полезным, умным и современным.
 """
 
         if mode == "fast":
@@ -459,17 +459,17 @@ def ask_ai(chat_id, text):
             system += "\nДавай подробные ответы."
 
         elif mode == "pro_ai":
-            system += """
-Ты PRO AI.
-Делай premium ответы.
-"""
+            system += "\nТы premium PRO AI."
 
         messages = [{
             "role": "system",
             "content": system
         }]
 
-        messages += load_memory(chat_id)
+        try:
+            messages += load_memory(chat_id)
+        except:
+            pass
 
         messages.append({
             "role": "user",
@@ -478,39 +478,68 @@ def ask_ai(chat_id, text):
 
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
+
             headers={
-                "Authorization":
-                f"Bearer {OPENROUTER_API_KEY}"
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://render.com",
+                "X-Title": "NeoHelper"
             },
+
             json={
-                "model":
-                "deepseek/deepseek-chat-v3-0324:free",
+                "model": "deepseek/deepseek-chat-v3-0324:free",
 
                 "messages": messages,
 
-                "temperature": 0.85,
+                "temperature": 0.8,
 
                 "max_tokens": 1200
             },
+
             timeout=60
         )
 
-        data = r.json()
+        print("STATUS:", r.status_code)
+        print("RESPONSE:", r.text)
+
+        if r.status_code != 200:
+            return "⚠️ AI сервер временно недоступен"
+
+        try:
+            data = r.json()
+        except:
+            return "⚠️ Ошибка обработки AI"
+
+        if "choices" not in data:
+            return "⚠️ AI вернул неверный ответ"
+
+        if not data["choices"]:
+            return "⚠️ Пустой ответ AI"
 
         reply = data["choices"][0]["message"]["content"]
 
-        save_memory(chat_id, "user", text)
-        save_memory(chat_id, "assistant", reply)
+        try:
+            save_memory(chat_id, "user", text)
+            save_memory(chat_id, "assistant", reply)
+        except:
+            pass
 
-        add_log(chat_id, "ai_message")
+        try:
+            add_log(chat_id, "ai_message")
+        except:
+            pass
 
         return reply
 
-    except:
+    except Exception as e:
 
-        add_log(chat_id, "ai_error")
+        print("AI ERROR:", e)
 
-        return "⚠️ AI временно недоступен"
+        try:
+            add_log(chat_id, "ai_error")
+        except:
+            pass
+
+        return "⚠️ Ошибка подключения AI"
 
 # =========================================
 # IMAGE SYSTEM
@@ -671,12 +700,11 @@ def webhook():
 
             return "ok"
 
-        # START
         if text == "/start":
 
             send(
                 chat_id,
-                "👋 Добро пожаловать в AI BOT V4",
+                "👋 Добро пожаловать в NeoHelper",
                 main_keyboard(chat_id)
             )
 
@@ -684,7 +712,6 @@ def webhook():
 
             return "ok"
 
-        # BACK
         if text == "🔙 Назад":
 
             cursor.execute("""
@@ -703,7 +730,6 @@ def webhook():
 
             return "ok"
 
-        # CHAT
         if text == "💬 Чат":
 
             send(
@@ -714,7 +740,6 @@ def webhook():
 
             return "ok"
 
-        # CHAT MODES
         modes = {
             "⚡ Быстрый": "fast",
             "🧠 Умный": "smart",
@@ -739,7 +764,6 @@ def webhook():
 
             return "ok"
 
-        # PRO AI
         if text == "🧠 PRO AI":
 
             plan = get_plan(chat_id)
@@ -769,7 +793,6 @@ def webhook():
 
             return "ok"
 
-        # IMAGE MENU
         if text == "🖼 Картинка":
 
             cursor.execute("""
@@ -788,7 +811,6 @@ def webhook():
 
             return "ok"
 
-        # IMAGE STYLES
         styles = {
             "🎨 Anime": "anime",
             "📸 Realistic": "realistic",
@@ -812,7 +834,6 @@ def webhook():
 
             return "ok"
 
-        # IMAGE GENERATION
         cursor.execute("""
         SELECT image_mode, image_style
         FROM users
@@ -845,7 +866,6 @@ def webhook():
 
             return "ok"
 
-        # LIMITS
         if text == "📊 Лимиты":
 
             plan = get_plan(chat_id)
@@ -880,7 +900,6 @@ f"""
 
             return "ok"
 
-        # ADMIN
         if text == "👑 Админ" and is_admin(chat_id):
 
             send(
@@ -891,7 +910,6 @@ f"""
 
             return "ok"
 
-        # ADMIN STATS
         if text == "📈 Статистика" and is_admin(chat_id):
 
             cursor.execute(
@@ -943,7 +961,6 @@ f"""
 
             return "ok"
 
-        # GIVE PRO
         if text == "💎 Выдать PRO" and is_admin(chat_id):
 
             admin_state[chat_id] = "give_pro"
@@ -953,7 +970,6 @@ f"""
 
             return "ok"
 
-        # GIVE ULTRA
         if text == "👑 Выдать ULTRA" and is_admin(chat_id):
 
             admin_state[chat_id] = "give_ultra"
@@ -963,7 +979,6 @@ f"""
 
             return "ok"
 
-        # BAN
         if text == "🚫 Бан" and is_admin(chat_id):
 
             admin_state[chat_id] = "ban"
@@ -973,7 +988,6 @@ f"""
 
             return "ok"
 
-        # UNBAN
         if text == "✅ Разбан" and is_admin(chat_id):
 
             admin_state[chat_id] = "unban"
@@ -983,7 +997,6 @@ f"""
 
             return "ok"
 
-        # ADMIN ACTIONS
         if chat_id in admin_state and is_admin(chat_id):
 
             action = admin_state[chat_id]
@@ -1046,7 +1059,6 @@ f"""
 
             return "ok"
 
-        # LIMIT CHECK
         if not check_message_limit(chat_id):
 
             send(chat_id,
@@ -1054,7 +1066,6 @@ f"""
 
             return "ok"
 
-        # AI
         reply = ask_ai(chat_id, text)
 
         send(
@@ -1065,12 +1076,15 @@ f"""
 
         return "ok"
 
-    except:
+    except Exception as e:
+
+        print("WEBHOOK ERROR:", e)
+
         return "ok"
 
 @app.route("/")
 def home():
-    return "AI BOT V4 STABLE READY"
+    return "NeoHelper V4 STABLE READY"
 
 if __name__ == "__main__":
 
