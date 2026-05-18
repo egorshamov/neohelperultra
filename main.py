@@ -1,6 +1,6 @@
 # =========================================
 # AI BOT V3 BETA
-# Stable Render Free Edition
+# STABLE RENDER FREE EDITION
 # =========================================
 
 import os
@@ -8,10 +8,6 @@ import time
 import sqlite3
 import requests
 from flask import Flask, request
-
-# =========================================
-# APP
-# =========================================
 
 app = Flask(__name__)
 
@@ -26,7 +22,6 @@ ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# USERS
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -42,7 +37,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MEMORY
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,6 +190,7 @@ def check_spam(chat_id, limit=1.2):
 
     plan = get_plan(chat_id)
 
+    # PRO / ULTRA без антиспама
     if plan in ["pro", "ultra"]:
         return True
 
@@ -290,7 +285,7 @@ def load_memory(chat_id):
     FROM memory
     WHERE user_id=?
     ORDER BY id DESC
-    LIMIT 8
+    LIMIT 10
     """, (chat_id,))
 
     rows = cursor.fetchall()
@@ -309,7 +304,7 @@ def load_memory(chat_id):
     return msgs
 
 # =========================================
-# AI
+# AI SYSTEM
 # =========================================
 
 def ask_ai(chat_id, text):
@@ -324,8 +319,9 @@ def ask_ai(chat_id, text):
     mode = row[0] if row else "smart"
 
     system = """
-Ты AI Telegram ассистент.
-Всегда отвечай на русском языке.
+Ты профессиональный AI ассистент Telegram.
+Всегда отвечай только на русском языке.
+Будь умным, полезным и современным.
 """
 
     if mode == "fast":
@@ -335,14 +331,14 @@ def ask_ai(chat_id, text):
         system += "\nУмные обычные ответы."
 
     elif mode == "deep":
-        system += "\nПодробные ответы."
+        system += "\nОчень подробные ответы."
 
     elif mode == "pro_ai":
-        system = """
+        system += """
 Ты PRO AI.
-Очень качественные,
+Очень глубокие,
 структурированные,
-умные ответы.
+умные ответы уровня premium.
 """
 
     messages = [
@@ -369,8 +365,8 @@ def ask_ai(chat_id, text):
             json={
                 "model": "openai/gpt-4o-mini",
                 "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 700
+                "temperature": 0.8,
+                "max_tokens": 900
             },
             timeout=60
         )
@@ -482,8 +478,8 @@ def pro_keyboard():
 
     return {
         "keyboard": [
-            ["🔹 PRO"],
-            ["💎 ULTRA"],
+            ["🔹 PRO - 120⭐"],
+            ["💎 ULTRA - 500⭐"],
             ["🔙 Назад"]
         ],
         "resize_keyboard": True
@@ -494,9 +490,6 @@ def admin_keyboard():
     return {
         "keyboard": [
             ["📈 Статистика"],
-            ["🚫 Бан", "✅ Разбан"],
-            ["💎 Выдать PRO"],
-            ["🧹 Очистить память"],
             ["🔙 Назад"]
         ],
         "resize_keyboard": True
@@ -557,6 +550,14 @@ def webhook():
     # =====================================
 
     if text == "🔙 Назад":
+
+        cursor.execute("""
+        UPDATE users
+        SET image_mode=0
+        WHERE user_id=?
+        """, (chat_id,))
+
+        conn.commit()
 
         send(
             chat_id,
@@ -620,7 +621,7 @@ def webhook():
 
             send(
                 chat_id,
-                "🚫 Только для PRO"
+                "🚫 PRO AI доступен только для PRO пользователей"
             )
 
             return "ok"
@@ -704,6 +705,9 @@ def webhook():
 
     if row and row[0] == 1:
 
+        if text.startswith("/"):
+            return "ok"
+
         if not check_image_limit(chat_id):
 
             send(
@@ -718,57 +722,34 @@ def webhook():
         send_photo(
             chat_id,
             img,
-            "🖼 Готово"
+            "🖼 Картинка готова"
         )
 
         return "ok"
 
     # =====================================
-    # PRO
+    # PRO MENU
     # =====================================
 
     if text == "💳 PRO":
 
         send(
             chat_id,
-            "💎 Тарифы:",
+            "💎 Платные тарифы:\n\n🔹 PRO — 120⭐\n💎 ULTRA — 500⭐",
             pro_keyboard()
         )
 
         return "ok"
 
-    if text == "🔹 PRO":
+    # =====================================
+    # BLOCK FREE PRO
+    # =====================================
 
-        cursor.execute("""
-        UPDATE users
-        SET plan='pro'
-        WHERE user_id=?
-        """, (chat_id,))
-
-        conn.commit()
+    if text in ["🔹 PRO - 120⭐", "💎 ULTRA - 500⭐"]:
 
         send(
             chat_id,
-            "✅ PRO активирован",
-            main_keyboard(chat_id)
-        )
-
-        return "ok"
-
-    if text == "💎 ULTRA":
-
-        cursor.execute("""
-        UPDATE users
-        SET plan='ultra'
-        WHERE user_id=?
-        """, (chat_id,))
-
-        conn.commit()
-
-        send(
-            chat_id,
-            "💎 ULTRA активирован",
-            main_keyboard(chat_id)
+            "⭐ Покупка через Telegram Stars скоро будет подключена"
         )
 
         return "ok"
